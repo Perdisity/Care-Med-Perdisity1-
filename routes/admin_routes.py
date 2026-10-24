@@ -332,7 +332,11 @@ def dashboard_data():
 
         refill_stats_query = db.session.query(
             func.coalesce(func.sum(case((Transaction.transaction_type == "Refill", Transaction.total_amount), else_=0)), 0),
-            func.coalesce(func.sum(case((Transaction.transaction_type == "Refill", Transaction.net_profit), else_=0)), 0),
+            func.coalesce(func.sum(case((
+                Transaction.transaction_type == "Refill",
+                func.coalesce(Transaction.total_amount, 0)
+                - func.coalesce(Transaction.quantity, 0) * func.coalesce(Transaction.refill_cost_per_unit, 0),
+            ), else_=0)), 0),
             func.coalesce(func.sum(case((Transaction.transaction_type == "Refill", Transaction.quantity), else_=0)), 0),
         )
         refill_stats_query = apply_date_filter(refill_stats_query)
