@@ -88,6 +88,9 @@
             <option value="overdue_return" {{ 'selected' if current_filter == 'overdue_return' }}>
                 Overdue Returns 
             </option>
+            <option value="partial_return" {{ 'selected' if current_filter == 'partial_return' }}>
+                Partial Returns — Outstanding Units
+            </option>
         </select>
 
         <!-- CLEAR FILTER BUTTON (shows only when filter is active) -->
@@ -184,6 +187,12 @@
 
                     <td class="center">
                         {{ rental.quantity }}
+                        {% if rental.status == 'Partially Returned' %}
+                            <small style="display:block; color:#b45309; font-weight:700; white-space:nowrap;">
+                                {{ rental.quantity_returned or 0 }} returned /
+                                {{ rental.remaining_to_return }} outstanding
+                            </small>
+                        {% endif %}
                     </td>
 
                     <td>
@@ -238,7 +247,7 @@
                     </td>
 
                     <td>
-                        <span class="status-pill active">
+                        <span class="status-pill {{ 'warning' if rental.status == 'Partially Returned' else 'active' }}">
                             <span class="dot"></span>
                             {{ rental.status or 'Active' }}
                         </span>

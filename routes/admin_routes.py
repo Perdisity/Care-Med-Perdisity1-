@@ -2536,7 +2536,7 @@ def transactions():
             Transaction.transaction_type == 'Rental',
             Transaction.rentals.any(
                 and_(
-                    Rental.status == 'Active',
+                    Rental.status.in_(['Active', 'Partially Returned']),
                     Rental.expected_return_date >= current_date,
                     Rental.expected_return_date <= soon
                 )
@@ -2548,7 +2548,7 @@ def transactions():
             Transaction.transaction_type == 'Rental',
             Transaction.rentals.any(
                 and_(
-                    Rental.status == 'Active',
+                    Rental.status.in_(['Active', 'Partially Returned']),
                     Rental.expected_return_date < current_date
                 )
             )
@@ -2829,7 +2829,7 @@ def active_rentals():
     search_query = request.args.get('q', '').strip()
     filter_type = request.args.get('filter', '')  
    
-    active_statuses = ['Active', 'Overdue', 'Awaiting Return']
+    active_statuses = ['Active', 'Overdue', 'Awaiting Return', 'Partially Returned']
     
     query = Rental.query.filter(Rental.status.in_(active_statuses))\
         .options(
@@ -2842,6 +2842,8 @@ def active_rentals():
         query = query.filter(Rental.expected_return_date < today)
     elif filter_type == 'awaiting_return':
         query = query.filter(Rental.status == 'Awaiting Return')
+    elif filter_type == 'partial_return':
+        query = query.filter(Rental.status == 'Partially Returned')
     
     rentals = query.order_by(Rental.expected_return_date.asc()).all()
     
@@ -3699,6 +3701,19 @@ def process_return(txn_id):
                 late_fees = computed_late_fees
 
         if late_fees > 0:
+            # RULE-09: every assessed late fee is written to the audit log,
+            # including the auto-computed amount and the configured daily rate.
+            db.session.add(SecurityLog(
+                event_type="Late Fee Assessed",
+                description=(
+                    f"Txn {txn.reference_no}: late fee ₱{late_fees:,.2f} "
+                    f"(computed ₱{computed_late_fees:,.2f}; "
+                    f"rate ₱{late_rate:,.2f}/day/unit)."
+                ),
+                user_id=current_user.id,
+                user_email=current_user.email,
+                severity="Low",
+            ))
             payment = Payment(
                 transaction_id=txn.id,
                 amount=late_fees,
@@ -5650,7 +5665,7 @@ def _build_notifications():
 
     # ── 2. RENTALS EXPIRING WITHIN 3 DAYS ─────────────────────────────────
     expiring_soon = Rental.query.filter(
-        Rental.status == 'Active',
+        Rental.status.in_(['Active', 'Partially Returned']),
         Rental.expected_return_date >= today,
         Rental.expected_return_date <= soon
     ).all()
@@ -5668,7 +5683,7 @@ def _build_notifications():
 
     # ── 3. OVERDUE RETURNS (items not returned past due date) ──────────────────
     overdue_returns = Rental.query.filter(
-        Rental.status == 'Active',
+        Rental.status.in_(['Active', 'Partially Returned']),
         Rental.expected_return_date < today
     ).all()
 
@@ -5683,6 +5698,32 @@ def _build_notifications():
             "title": f"{len(overdue_returns)} Equipment Return{'s' if len(overdue_returns) > 1 else ''} OVERDUE",
             "message": f"{len(overdue_returns)} item{'s' if len(overdue_returns) > 1 else ''} not returned. Oldest: {days_overdue} days late.",
             "link": "/admin/active-rentals?filter=overdue_return" 
+        })
+
+    # ── 3b. PARTIAL RETURNS (RULE-08) ─────────────────────────────────────
+    partial_returns = Rental.query.filter(
+        Rental.status == 'Partially Returned'
+    ).all()
+
+    if partial_returns:
+        outstanding_units = sum(
+            max(0, (rental.quantity or 0) - (rental.quantity_returned or 0))
+            for rental in partial_returns
+        )
+        notifications.append({
+            "id": "partial_returns",
+            "type": "warning",
+            "icon": "assignment_return",
+            "title": (
+                f"{len(partial_returns)} Partial Return"
+                f"{'s' if len(partial_returns) > 1 else ''}"
+            ),
+            "message": (
+                f"{outstanding_units} unit"
+                f"{'s' if outstanding_units != 1 else ''} still outstanding "
+                "and locked as rented."
+            ),
+            "link": "/admin/active-rentals?filter=partial_return",
         })
 
     # ── 4. UNPAID SALE TRANSACTIONS ───────────────────────────────────────
