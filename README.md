@@ -51,6 +51,8 @@ Add the following rule to execute the script daily at midnight (`0 0 * * *`), di
 ```bash
 0 0 * * * /home/username/CareMed-App/venv/bin/python /home/username/CareMed-App/generate_invoices.py >> /home/username/CareMed-App/logs/caremed_invoices.log 2>&1
 
+
+
 ```
 Step 4: Verify Your Setup
 To ensure the system successfully registered your automated schedule, run:

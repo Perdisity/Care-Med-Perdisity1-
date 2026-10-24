@@ -16,6 +16,9 @@ class User(UserMixin, db.Model):
     profile_path = db.Column(db.String(255), nullable=True)
     
     role = db.Column(db.String(20), default="customer") 
+    # Job function from the thesis (Owner/Admin, Counter Staff, Inventory
+    # Custodian, Delivery Personnel). `role` still controls route access.
+    staff_position = db.Column(db.String(40), nullable=True)
     
     google_id = db.Column(db.String(255), unique=True)
     oauth_provider = db.Column(db.String(50))

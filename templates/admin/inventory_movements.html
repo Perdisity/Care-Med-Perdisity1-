@@ -1,0 +1,154 @@
+{% extends "admin/nav_base.html" %}
+
+{% block title %}Inventory Movements{% endblock %}
+{% block page_title %}Inventory Movements{% endblock %}
+
+{% block content %}
+<section class="content-card" style="max-width: 1200px; margin: 0 auto;">
+    <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:18px; flex-wrap:wrap;">
+        <div>
+            <h2 style="margin:0 0 6px 0; color:#002347; font-size:1.2rem; display:flex; align-items:center; gap:10px;">
+                <span class="material-symbols-rounded" style="color:#0284c7;">swap_vert</span>
+                Stock Movement Log
+            </h2>
+            <p style="margin:0; color:#64748b; font-size:0.85rem;">
+                Every sale, rental, return, restock, adjustment and void, with its reference number,
+                reason code, user, and resulting balance (Chapter IV, Table 15).
+            </p>
+        </div>
+        <a href="{{ url_for('admin.export_report', report_type='movements', start_date=start_date, end_date=end_date) }}"
+            class="btn-medical-primary" style="text-decoration:none; padding:9px 14px; display:inline-flex; align-items:center; gap:6px;">
+            <span class="material-symbols-rounded" style="font-size:17px;">download</span> Export Excel
+        </a>
+    </div>
+
+    <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; margin-bottom:18px;">
+        <div style="border:1px solid #e2e8f0; border-radius:10px; padding:14px; background:#f8fafc;">
+            <div style="font-size:0.7rem; font-weight:700; color:#64748b; text-transform:uppercase;">Movements</div>
+            <div style="font-size:1.3rem; font-weight:800; color:#0f172a;">{{ total_moves }}</div>
+        </div>
+        <div style="border:1px solid #bbf7d0; border-radius:10px; padding:14px; background:#f0fdf4;">
+            <div style="font-size:0.7rem; font-weight:700; color:#15803d; text-transform:uppercase;">Units In</div>
+            <div style="font-size:1.3rem; font-weight:800; color:#15803d;">+{{ stock_in }}</div>
+        </div>
+        <div style="border:1px solid #fecaca; border-radius:10px; padding:14px; background:#fef2f2;">
+            <div style="font-size:0.7rem; font-weight:700; color:#b91c1c; text-transform:uppercase;">Units Out</div>
+            <div style="font-size:1.3rem; font-weight:800; color:#b91c1c;">-{{ stock_out }}</div>
+        </div>
+    </div>
+
+    <form method="GET" action="{{ url_for('admin.inventory_movements') }}"
+        style="display:grid; grid-template-columns:2fr 1.4fr 1.2fr 1fr 1fr auto; gap:10px; align-items:end; margin-bottom:18px;">
+        <div>
+            <label class="clinical-label">Search</label>
+            <input type="text" name="q" value="{{ search_query }}" class="clinical-input" style="height:38px;"
+                placeholder="Reference, item, note, user…">
+        </div>
+        <div>
+            <label class="clinical-label">Product</label>
+            <select name="product_id" class="clinical-input" style="height:38px;">
+                <option value="">All products</option>
+                {% for product in products %}
+                <option value="{{ product.id }}" {% if product_id == product.id %}selected{% endif %}>
+                    {{ product.equipment_type }} — {{ product.name }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label class="clinical-label">Reason</label>
+            <select name="reason" class="clinical-input" style="height:38px;">
+                <option value="">All reasons</option>
+                {% for reason in reason_codes %}
+                <option value="{{ reason }}" {% if reason_filter == reason %}selected{% endif %}>{{ reason }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label class="clinical-label">From</label>
+            <input type="date" name="start_date" value="{{ start_date }}" class="clinical-input" style="height:38px;">
+        </div>
+        <div>
+            <label class="clinical-label">To</label>
+            <input type="date" name="end_date" value="{{ end_date }}" class="clinical-input" style="height:38px;">
+        </div>
+        <div style="display:flex; gap:6px;">
+            <button type="submit" class="btn-medical-primary" style="padding:8px 12px; font-size:0.75rem;">Filter</button>
+            <a href="{{ url_for('admin.inventory_movements') }}" class="btn-medical-outline"
+                style="padding:8px 12px; font-size:0.75rem; text-decoration:none;">Reset</a>
+        </div>
+    </form>
+
+    <div style="overflow-x:auto;">
+        <table style="width:100%; border-collapse:collapse; font-size:0.82rem;">
+            <thead>
+                <tr style="background:#f8fafc; color:#64748b; text-transform:uppercase; font-size:0.7rem;">
+                    <th style="text-align:left; padding:10px;">Date &amp; Time</th>
+                    <th style="text-align:left; padding:10px;">Reference</th>
+                    <th style="text-align:left; padding:10px;">Product</th>
+                    <th style="text-align:left; padding:10px;">Reason</th>
+                    <th style="text-align:left; padding:10px;">Action</th>
+                    <th style="text-align:right; padding:10px;">Qty</th>
+                    <th style="text-align:right; padding:10px;">Balance</th>
+                    <th style="text-align:left; padding:10px;">User</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for log in pagination.items %}
+                <tr style="border-bottom:1px solid #f1f5f9; vertical-align:top;">
+                    <td style="padding:10px; color:#475569; white-space:nowrap;">
+                        {{ log.created_at.strftime('%b %d, %Y') }}<br>
+                        <span style="color:#94a3b8; font-size:0.72rem;">{{ log.created_at.strftime('%I:%M %p') }}</span>
+                    </td>
+                    <td style="padding:10px; font-weight:700; color:#0369a1;">{{ log.reference_no or '—' }}</td>
+                    <td style="padding:10px;">
+                        {% if log.product %}
+                        {{ log.product.equipment_type }}<br>
+                        <span style="color:#64748b; font-size:0.75rem;">{{ log.product.name }}</span>
+                        {% else %}
+                        <span style="color:#94a3b8;">—</span>
+                        {% endif %}
+                    </td>
+                    <td style="padding:10px;">
+                        <span style="padding:2px 7px; border-radius:999px; background:#f1f5f9; color:#475569; font-size:0.68rem; font-weight:700;">
+                            {{ log.reason_code or 'LEGACY' }}
+                        </span>
+                    </td>
+                    <td style="padding:10px; color:#334155;">{{ log.action }}</td>
+                    <td style="padding:10px; text-align:right; font-weight:800;
+                        color:{{ '#15803d' if log.quantity and log.quantity > 0 else ('#b91c1c' if log.quantity and log.quantity < 0 else '#64748b') }};">
+                        {% if log.quantity is not none %}{{ '%+d'|format(log.quantity) }}{% else %}—{% endif %}
+                    </td>
+                    <td style="padding:10px; text-align:right; color:#334155;">
+                        {{ log.balance_after if log.balance_after is not none else '—' }}
+                    </td>
+                    <td style="padding:10px; color:#475569;">{{ log.user_name or 'System' }}</td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="8" style="text-align:center; padding:36px; color:#94a3b8;">
+                        No movements match these filters.
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    {% if pagination.pages > 1 %}
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:16px; font-size:0.8rem; color:#64748b;">
+        <div>Page {{ pagination.page }} of {{ pagination.pages }} · {{ pagination.total }} movements</div>
+        <div style="display:flex; gap:6px;">
+            {% if pagination.has_prev %}
+            <a class="btn-medical-outline" style="padding:6px 11px; text-decoration:none;"
+                href="{{ url_for('admin.inventory_movements', page=pagination.prev_num, limit=current_limit, product_id=product_id, reason=reason_filter, q=search_query, start_date=start_date, end_date=end_date) }}">← Prev</a>
+            {% endif %}
+            {% if pagination.has_next %}
+            <a class="btn-medical-outline" style="padding:6px 11px; text-decoration:none;"
+                href="{{ url_for('admin.inventory_movements', page=pagination.next_num, limit=current_limit, product_id=product_id, reason=reason_filter, q=search_query, start_date=start_date, end_date=end_date) }}">Next →</a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+</section>
+{% endblock %}

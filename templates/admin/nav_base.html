@@ -172,6 +172,27 @@
                         </a>
                     </li>
 
+                    {# ── Stock Adjustments ── #}
+                    {% set can_adjust = current_user.role.strip() == 'Administrator' or (current_user.permissions and current_user.permissions.can_update_stock) %}
+                    <li class="nav-item" title="Stock Adjustments">
+                        <a href="{{ url_for('admin.adjustments') if can_adjust else 'javascript:void(0)' }}"
+                            class="nav-link {% if request.endpoint == 'admin.adjustments' %}active{% endif %} {% if not can_adjust %}nav-locked{% endif %}">
+                            <span class="material-symbols-rounded">fact_check</span>
+                            <span class="nav-label">Stock Adjustments</span>
+                            {% if not can_adjust %}<span class="material-symbols-rounded nav-lock-icon">lock</span>{% endif %}
+                        </a>
+                    </li>
+
+                    {# ── Movement Log ── #}
+                    <li class="nav-item" title="Inventory Movements">
+                        <a href="{{ url_for('admin.inventory_movements') if can_adjust else 'javascript:void(0)' }}"
+                            class="nav-link {% if request.endpoint == 'admin.inventory_movements' %}active{% endif %} {% if not can_adjust %}nav-locked{% endif %}">
+                            <span class="material-symbols-rounded">swap_vert</span>
+                            <span class="nav-label">Movement Log</span>
+                            {% if not can_adjust %}<span class="material-symbols-rounded nav-lock-icon">lock</span>{% endif %}
+                        </a>
+                    </li>
+
                     {# ── Active Rentals ── #}
                     {% set can_active_rentals = current_user.role.strip() == 'Administrator' or (current_user.permissions and current_user.permissions.can_view_active_rentals) %}
                     <li class="nav-item" title="Active Rentals">
@@ -184,15 +205,15 @@
                     </li>
 
                     {# ── Reports & Analytics ── #}
-                    <!-- {% set can_reports = current_user.role.strip() == 'Administrator' or (current_user.permissions and current_user.permissions.can_view_reports) %}
+                    {% set can_reports = current_user.role.strip() == 'Administrator' or (current_user.permissions and current_user.permissions.can_view_reports) %}
                     <li class="nav-item" title="Reports & Analytics">
                         <a href="{{ url_for('admin.reports') if can_reports else 'javascript:void(0)' }}"
                             class="nav-link {% if request.endpoint == 'admin.reports' %}active{% endif %} {% if not can_reports %}nav-locked{% endif %}">
                             <span class="material-symbols-rounded">analytics</span>
-                            <span class="nav-label">Reports & Analytics</span>
+                            <span class="nav-label">Reports &amp; Analytics</span>
                             {% if not can_reports %}<span class="material-symbols-rounded nav-lock-icon">lock</span>{% endif %}
                         </a>
-                    </li> -->
+                    </li>
 
                     {# ── Collection Monitoring ── #}
                     {% set can_collection = current_user.role.strip() == 'Administrator' or (current_user.permissions and current_user.permissions.can_view_active_rentals) %}
@@ -206,12 +227,13 @@
                     </li>
 
                     {# ── System Logs ── #}
+                    {% set can_logs = current_user.role.strip() == 'Administrator' or (current_user.permissions and current_user.permissions.can_view_logs) %}
                     <li class="nav-item" title="System Logs">
-                        <a href="{{ url_for('admin.system_logs') if can_reports else 'javascript:void(0)' }}"
-                            class="nav-link {% if request.endpoint == 'admin.system_logs' %}active{% endif %} {% if not can_reports %}nav-locked{% endif %}">
+                        <a href="{{ url_for('admin.system_logs') if can_logs else 'javascript:void(0)' }}"
+                            class="nav-link {% if request.endpoint == 'admin.system_logs' %}active{% endif %} {% if not can_logs %}nav-locked{% endif %}">
                             <span class="material-symbols-rounded">list_alt</span>
                             <span class="nav-label">System Logs</span>
-                            {% if not can_reports %}<span class="material-symbols-rounded nav-lock-icon">lock</span>{% endif %}
+                            {% if not can_logs %}<span class="material-symbols-rounded nav-lock-icon">lock</span>{% endif %}
                         </a>
                     </li>
 
@@ -228,6 +250,24 @@
 
                     {# ── Admin-only — always locked for Staff ── #}
                     {% set is_admin = current_user.role.strip() == 'Administrator' %}
+
+                    <li class="nav-item" title="Business Rules & Settings">
+                        <a href="{{ url_for('admin.settings') if is_admin else 'javascript:void(0)' }}"
+                            class="nav-link {% if request.endpoint == 'admin.settings' %}active{% endif %} {% if not is_admin %}nav-locked{% endif %}">
+                            <span class="material-symbols-rounded">tune</span>
+                            <span class="nav-label">Business Rules</span>
+                            {% if not is_admin %}<span class="material-symbols-rounded nav-lock-icon">lock</span>{% endif %}
+                        </a>
+                    </li>
+
+                    <li class="nav-item" title="Void Requests">
+                        <a href="{{ url_for('admin.void_requests') if is_admin else 'javascript:void(0)' }}"
+                            class="nav-link {% if request.endpoint == 'admin.void_requests' %}active{% endif %} {% if not is_admin %}nav-locked{% endif %}">
+                            <span class="material-symbols-rounded">rule</span>
+                            <span class="nav-label">Void Requests</span>
+                            {% if not is_admin %}<span class="material-symbols-rounded nav-lock-icon">lock</span>{% endif %}
+                        </a>
+                    </li>
 
                     <li class="nav-item" title="Staff Management">
                         <a href="{{ url_for('admin.staff_management') if is_admin else 'javascript:void(0)' }}"

@@ -86,13 +86,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Populate Basic Info
                 document.getElementById('edit-user-id').value = editBtn.dataset.userId;
                 document.getElementById('edit-user-role').value = editBtn.dataset.role;
+                document.getElementById('edit-user-position').value = editBtn.dataset.position || '';
                 document.getElementById('edit-user-name').innerText = 
                     `Editing: ${editBtn.dataset.firstName} ${editBtn.dataset.lastName}`;
                 
                 // Populate Permission Toggles
                 const permissionFields = [
-                    'can_manage_customers', 'can_manage_products', 'can_process_transactions', 
-                    'can_confirm_payments', 'can_manage_expenses', 'can_view_reports', 'can_view_active_rentals'
+                    'can_manage_customers', 'can_verify_customers', 'can_manage_products',
+                    'can_update_stock', 'can_process_transactions', 'can_confirm_payments',
+                    'can_export_transactions', 'can_manage_expenses', 'can_view_reports',
+                    'can_view_logs', 'can_view_active_rentals'
                 ];
 
                 permissionFields.forEach(field => {

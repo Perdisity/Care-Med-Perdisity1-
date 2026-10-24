@@ -178,6 +178,52 @@
 
 {% block content %}
 
+{# ── Export toolbar (Chapter IV Table 15: sales, rentals, low stock, tanks) ── #}
+<div style="background:#fff; border:1px solid #e2e8f0; border-radius:12px; padding:14px 16px; margin-bottom:16px;">
+    <form id="exportForm" method="GET" action="{{ url_for('admin.export_report', report_type='sales') }}">
+        <div style="display:flex; flex-wrap:wrap; align-items:flex-end; gap:12px;">
+            <div>
+                <label style="display:block; font-size:0.7rem; font-weight:700; color:#64748b; text-transform:uppercase; margin-bottom:4px;">From</label>
+                <input type="date" id="export-start" name="start_date" class="clinical-input" style="height:38px; padding:0 10px;">
+            </div>
+            <div>
+                <label style="display:block; font-size:0.7rem; font-weight:700; color:#64748b; text-transform:uppercase; margin-bottom:4px;">To</label>
+                <input type="date" id="export-end" name="end_date" class="clinical-input" style="height:38px; padding:0 10px;">
+            </div>
+            <div style="display:flex; gap:6px; padding-bottom:2px;">
+                <button type="button" class="cutoff-preset" data-preset="month" style="border:1px solid #cbd5e1; background:#f8fafc; border-radius:7px; padding:7px 10px; font-size:0.72rem; font-weight:700; color:#334155; cursor:pointer;">This Month</button>
+                <button type="button" class="cutoff-preset" data-preset="first" style="border:1px solid #cbd5e1; background:#f8fafc; border-radius:7px; padding:7px 10px; font-size:0.72rem; font-weight:700; color:#334155; cursor:pointer;">1st–5th</button>
+                <button type="button" class="cutoff-preset" data-preset="second" style="border:1px solid #cbd5e1; background:#f8fafc; border-radius:7px; padding:7px 10px; font-size:0.72rem; font-weight:700; color:#334155; cursor:pointer;">6th–20th</button>
+                <button type="button" class="cutoff-preset" data-preset="third" style="border:1px solid #cbd5e1; background:#f8fafc; border-radius:7px; padding:7px 10px; font-size:0.72rem; font-weight:700; color:#334155; cursor:pointer;">21st–End</button>
+            </div>
+            <div style="flex:1;"></div>
+            <div style="display:flex; flex-wrap:wrap; gap:6px;">
+                <button type="submit" formaction="{{ url_for('admin.export_report', report_type='sales') }}" style="display:inline-flex; align-items:center; gap:5px; border:1px solid #86efac; background:#f0fdf4; color:#15803d; border-radius:7px; padding:7px 11px; font-size:0.72rem; font-weight:700; cursor:pointer;">
+                    <span class="material-symbols-rounded" style="font-size:15px;">download</span> Sales
+                </button>
+                <button type="submit" formaction="{{ url_for('admin.export_report', report_type='rentals') }}" style="display:inline-flex; align-items:center; gap:5px; border:1px solid #bae6fd; background:#f0f9ff; color:#0369a1; border-radius:7px; padding:7px 11px; font-size:0.72rem; font-weight:700; cursor:pointer;">
+                    <span class="material-symbols-rounded" style="font-size:15px;">download</span> Rentals
+                </button>
+                <button type="submit" formaction="{{ url_for('admin.export_report', report_type='low-stock') }}" style="display:inline-flex; align-items:center; gap:5px; border:1px solid #fde68a; background:#fffbeb; color:#b45309; border-radius:7px; padding:7px 11px; font-size:0.72rem; font-weight:700; cursor:pointer;">
+                    <span class="material-symbols-rounded" style="font-size:15px;">download</span> Low Stock
+                </button>
+                <button type="submit" formaction="{{ url_for('admin.export_report', report_type='tanks') }}" style="display:inline-flex; align-items:center; gap:5px; border:1px solid #c4b5fd; background:#f5f3ff; color:#6d28d9; border-radius:7px; padding:7px 11px; font-size:0.72rem; font-weight:700; cursor:pointer;">
+                    <span class="material-symbols-rounded" style="font-size:15px;">download</span> Tanks
+                </button>
+                <button type="submit" formaction="{{ url_for('admin.export_report', report_type='movements') }}" style="display:inline-flex; align-items:center; gap:5px; border:1px solid #cbd5e1; background:#f8fafc; color:#334155; border-radius:7px; padding:7px 11px; font-size:0.72rem; font-weight:700; cursor:pointer;">
+                    <span class="material-symbols-rounded" style="font-size:15px;">download</span> Movements
+                </button>
+                <button type="submit" formaction="{{ url_for('admin.export_report', report_type='supplier') }}" style="display:inline-flex; align-items:center; gap:5px; border:1px solid #fecaca; background:#fef2f2; color:#b91c1c; border-radius:7px; padding:7px 11px; font-size:0.72rem; font-weight:700; cursor:pointer;">
+                    <span class="material-symbols-rounded" style="font-size:15px;">download</span> Prime Gas
+                </button>
+            </div>
+        </div>
+        <div style="margin-top:8px; font-size:0.7rem; color:#94a3b8;">
+            Excel exports respect the date range above. Prime Gas reconciles on the 5th and 20th of each month.
+        </div>
+    </form>
+</div>
+
 {# ── Toolbar ── #}
 <div class="tab-group">
     <button class="tab-btn active" data-tab="sales">Sales</button>
@@ -268,7 +314,7 @@
                     <td>
                         {% if p.stock == 0 %}
                             <span class="status-tag tag-danger">Out of stock</span>
-                        {% elif p.stock <= 5 %}
+                        {% elif p.stock <= (p.reorder_level or 5) %}
                             <span class="status-tag tag-warning">Low stock</span>
                         {% else %}
                             <span class="status-tag tag-success">{{ p.stock }} units</span>
@@ -981,6 +1027,40 @@ const OVERDUE_R    = {{ overdue_rentals | length }};
 const RETURNED_R   = {{ returned_rentals }};
 const TOTAL_CUST   = {{ total_customers }};
 const RETURNING    = {{ returning_count }};
+</script>
+
+<script nonce="{{ csp_nonce() }}">
+(function () {
+    const startEl = document.getElementById('export-start');
+    const endEl = document.getElementById('export-end');
+    if (!startEl || !endEl) return;
+
+    const pad = n => String(n).padStart(2, '0');
+    const fmt = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+
+    function applyPreset(preset) {
+        const now = new Date();
+        const y = now.getFullYear();
+        const m = now.getMonth();
+        const lastDay = new Date(y, m + 1, 0).getDate();
+        let startDay = 1;
+        let endDay = lastDay;
+        if (preset === 'first') { startDay = 1; endDay = 5; }
+        else if (preset === 'second') { startDay = 6; endDay = 20; }
+        else if (preset === 'third') { startDay = 21; endDay = lastDay; }
+        startEl.value = fmt(new Date(y, m, startDay));
+        endEl.value = fmt(new Date(y, m, endDay));
+    }
+
+    document.querySelectorAll('.cutoff-preset').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            applyPreset(this.dataset.preset);
+        });
+    });
+
+    // Default the range to the current month so exports are never unbounded.
+    applyPreset('month');
+})();
 </script>
 
 <script src="{{ url_for('static', filename='js/admin/admin_report.js') }}" nonce="{{ csp_nonce() }}"></script>

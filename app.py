@@ -10,12 +10,14 @@ from models.customer import Customer
 from models.product import Product, Purchase, Rental, InventoryLog
 from flask_talisman import Talisman
 from models.users import SecurityLog, BlockedIP
+from models.operations import StockAdjustment, VoidRequest
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
 from flask_login import current_user, logout_user
 from datetime import datetime, timezone, timedelta
-from flask import session
+from flask import session, g
 from werkzeug.middleware.proxy_fix import ProxyFix
+from models.settings import SystemSetting
 
 
 app = Flask(__name__)
@@ -223,6 +225,18 @@ def currency(value):
         return f"₱{value:,.2f}"
     except Exception:
         return "₱0.00"
+
+
+@app.context_processor
+def inject_business_rules():
+    """Expose owner-editable rules to every template (FR02, RULE-03, RULE-09, RULE-10)."""
+    if "biz" not in g:
+        g.biz = {
+            key: row.as_python()
+            for key, row in SystemSetting.all_effective().items()
+        }
+    return {"biz": g.biz}
+
     
 @app.route('/')
 def root():

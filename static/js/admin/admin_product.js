@@ -88,6 +88,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const row = btn.closest('tr');
         if (!row) return;
 
+        const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[c]));
+
         const productId = btn.dataset.productId;
         const equipmentName = row.cells[1].innerText;
         const model = row.cells[2].innerText;
@@ -104,22 +108,33 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!logs.length) {
                 container.innerHTML = "<p>No history available.</p>";
             } else {
-                container.innerHTML = logs.map(log => `
+                container.innerHTML = logs.map(log => {
+                    const refLine = log.reference
+                        ? `<div style="font-size:0.7rem;color:#64748b;font-weight:700;margin-bottom:3px;">
+                               ${escapeHtml(log.reference)}${log.reason ? ` · ${escapeHtml(log.reason)}` : ''}
+                           </div>`
+                        : '';
+                    const balanceLine = (log.balance_after !== null && log.balance_after !== undefined)
+                        ? `<span><i class="material-symbols-rounded" style="font-size:14px; vertical-align:middle;">account_balance_wallet</i> Balance: ${escapeHtml(log.balance_after)}</span>`
+                        : '';
+                    return `
                     <div class="timeline-item">
                         <div class="timeline-marker ${getMarkerClass(log.action)}"></div>
                         <div class="timeline-content">
                             <div class="timeline-header">
-                                <span class="event-title">${log.action}</span>
-                                <span class="event-time">${log.date}</span>
+                                <span class="event-title">${escapeHtml(log.action)}</span>
+                                <span class="event-time">${escapeHtml(log.date)}</span>
                             </div>
-                            <p class="event-details">${log.note || "No additional notes."}</p>
+                            ${refLine}
+                            <p class="event-details">${escapeHtml(log.note || "No additional notes.")}</p>
                             <div class="event-meta">
-                                <span><i class="material-symbols-rounded" style="font-size:14px; vertical-align:middle;">person</i> ${log.user || 'System'}</span>
-                                ${log.quantity ? `<span><i class="material-symbols-rounded" style="font-size:14px; vertical-align:middle;">inventory_2</i> Qty: ${log.quantity}</span>` : ""}
+                                <span><i class="material-symbols-rounded" style="font-size:14px; vertical-align:middle;">person</i> ${escapeHtml(log.user || 'System')}</span>
+                                ${log.quantity ? `<span><i class="material-symbols-rounded" style="font-size:14px; vertical-align:middle;">inventory_2</i> Qty: ${escapeHtml(log.quantity)}</span>` : ""}
+                                ${balanceLine}
                             </div>
                         </div>
                     </div>
-                `).join("");
+                `}).join("");
             }
         } catch (err) {
             container.innerHTML = "<p>Error loading history.</p>";
@@ -206,6 +221,7 @@ document.addEventListener('DOMContentLoaded', () => {
             'edit-name': productData.name,
             'edit-size': productData.size,     
             'edit-condition': productData.condition,
+            'edit-reorder': productData.reorder_level,
             'edit-description': productData.description,
             'edit-offer-type': offerType,
             'edit-rent': productData.rent_price,
@@ -261,6 +277,7 @@ document.addEventListener('DOMContentLoaded', () => {
             'edit-name': document.getElementById('edit-name').value,
             'edit-size': document.getElementById('edit-size').value,      
             'edit-condition': document.getElementById('edit-condition').value,
+            'edit-reorder': document.getElementById('edit-reorder').value,
             'edit-description': document.getElementById('edit-description').value,
             'edit-offer-type': document.getElementById('edit-offer-type').value,
             'edit-rent': document.getElementById('edit-rent').value,
@@ -444,6 +461,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         cost_price: editBtn.dataset.costPrice || 0,
                         stock: editBtn.dataset.stock || 0,
                         condition: editBtn.dataset.condition || 'N/A',
+                        reorder_level: editBtn.dataset.reorder || 0,
                         offer_type: editBtn.dataset.offer || '',
                         rent_period: editBtn.dataset.period || 'Monthly',
                         rent_price: editBtn.dataset.rent || 0,

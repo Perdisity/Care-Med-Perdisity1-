@@ -1,0 +1,118 @@
+{% extends "admin/nav_base.html" %}
+
+{% block title %}Void Requests{% endblock %}
+{% block page_title %}Void Requests{% endblock %}
+
+{% block content %}
+<section class="content-card" style="max-width: 1100px; margin: 0 auto;">
+    <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:20px;">
+        <div>
+            <h2 style="margin:0 0 6px 0; color:#002347; font-size:1.2rem; display:flex; align-items:center; gap:10px;">
+                <span class="material-symbols-rounded" style="color:#dc2626;">rule</span>
+                Pending Void / Cancellation Requests
+            </h2>
+            <p style="margin:0; color:#64748b; font-size:0.85rem;">
+                Staff-submitted cancellations require Administrator approval before stock is restored
+                (Chapter IV, Table 15).
+            </p>
+        </div>
+        <a href="{{ url_for('admin.transactions') }}" class="btn-medical-outline"
+            style="text-decoration:none; padding:9px 14px; display:inline-flex; align-items:center; gap:6px;">
+            <span class="material-symbols-rounded" style="font-size:16px;">receipt_long</span> Transactions
+        </a>
+    </div>
+
+    {% if pending %}
+    <div style="display:flex; flex-direction:column; gap:12px;">
+        {% for req in pending %}
+        <div style="border:1px solid #fecaca; background:#fff7f7; border-radius:12px; padding:16px;">
+            <div style="display:flex; justify-content:space-between; gap:16px; flex-wrap:wrap;">
+                <div>
+                    <div style="font-weight:800; color:#7f1d1d; font-size:0.95rem;">
+                        {{ req.transaction.reference_no }}
+                        <span style="font-weight:600; color:#64748b;">· {{ req.transaction.transaction_type }}</span>
+                    </div>
+                    <div style="color:#334155; font-size:0.85rem; margin-top:4px;">
+                        {{ req.transaction.customer_name or 'Walk-in Customer' }}
+                        · ₱{{ "{:,.2f}".format(req.transaction.total_amount or 0) }}
+                    </div>
+                    <div style="color:#64748b; font-size:0.8rem; margin-top:8px;">
+                        <strong>Reason:</strong> {{ req.reason }}
+                    </div>
+                    <div style="color:#94a3b8; font-size:0.72rem; margin-top:6px;">
+                        Requested by {{ req.requested_by.full_name if req.requested_by else 'Staff' }}
+                        on {{ req.requested_at.strftime('%b %d, %Y %H:%M') }}
+                    </div>
+                </div>
+                <div style="display:flex; flex-direction:column; gap:8px; min-width:280px;">
+                    <form method="POST" action="{{ url_for('admin.approve_void_request', request_id=req.id) }}"
+                        style="display:flex; gap:8px; align-items:center;">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <input type="text" name="review_note" class="clinical-input" placeholder="Approval note (optional)"
+                            style="height:36px; font-size:0.78rem; flex:1;">
+                        <button type="submit" class="btn-medical-primary"
+                            style="padding:8px 12px; font-size:0.75rem; white-space:nowrap;">Approve</button>
+                    </form>
+                    <form method="POST" action="{{ url_for('admin.reject_void_request', request_id=req.id) }}"
+                        style="display:flex; gap:8px; align-items:center;">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <input type="text" name="review_note" class="clinical-input" placeholder="Rejection note (optional)"
+                            style="height:36px; font-size:0.78rem; flex:1;">
+                        <button type="submit" class="btn-medical-outline"
+                            style="padding:8px 12px; font-size:0.75rem; white-space:nowrap; color:#b91c1c; border-color:#fecaca;">Reject</button>
+                    </form>
+                </div>
+            </div>
+            <div style="margin-top:10px;">
+                <a href="{{ url_for('admin.transaction_details', id=req.transaction.id) }}"
+                    style="font-size:0.75rem; color:#0369a1; font-weight:700; text-decoration:none;">
+                    Open transaction details →
+                </a>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div style="text-align:center; padding:40px; color:#94a3b8;">
+        <span class="material-symbols-rounded" style="font-size:40px; display:block; margin-bottom:8px;">check_circle</span>
+        No pending void requests.
+    </div>
+    {% endif %}
+
+    {% if history %}
+    <h3 style="margin:28px 0 12px; color:#0f172a; font-size:1rem;">Recently Reviewed</h3>
+    <div style="overflow-x:auto;">
+        <table style="width:100%; border-collapse:collapse; font-size:0.82rem;">
+            <thead>
+                <tr style="background:#f8fafc; color:#64748b; text-transform:uppercase; font-size:0.7rem;">
+                    <th style="text-align:left; padding:10px;">Reference</th>
+                    <th style="text-align:left; padding:10px;">Reason</th>
+                    <th style="text-align:left; padding:10px;">Requested By</th>
+                    <th style="text-align:left; padding:10px;">Status</th>
+                    <th style="text-align:left; padding:10px;">Reviewed</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for req in history %}
+                <tr style="border-bottom:1px solid #f1f5f9;">
+                    <td style="padding:10px; font-weight:600;">{{ req.transaction.reference_no }}</td>
+                    <td style="padding:10px; color:#475569;">{{ req.reason }}</td>
+                    <td style="padding:10px;">{{ req.requested_by.full_name if req.requested_by else '—' }}</td>
+                    <td style="padding:10px;">
+                        <span style="padding:3px 8px; border-radius:999px; font-size:0.7rem; font-weight:700;
+                            background:{{ '#f0fdf4' if req.status == 'Approved' else '#fef2f2' }};
+                            color:{{ '#15803d' if req.status == 'Approved' else '#b91c1c' }};">
+                            {{ req.status }}
+                        </span>
+                    </td>
+                    <td style="padding:10px; color:#64748b;">
+                        {{ req.reviewed_at.strftime('%b %d, %Y %H:%M') if req.reviewed_at else '—' }}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</section>
+{% endblock %}

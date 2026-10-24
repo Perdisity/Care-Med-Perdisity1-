@@ -196,7 +196,10 @@
 
                     <div class="form-field" style="margin-bottom: 0;">
                         <label>Customer Deposit (₱)</label>
-                        <input type="number" id="rent-customer-deposit" name="customer_deposit" class="clinical-input" step="0.01" value="0.00" placeholder="Refundable deposit">
+                        <input type="number" id="rent-customer-deposit" name="customer_deposit" class="clinical-input" step="0.01" value="0.00" placeholder="Refundable deposit"
+                            data-flat-deposit="{{ biz.deposit_flat_amount }}"
+                            title="Delivery rentals use the flat deposit set by the administrator.">
+                        <small style="color:#64748b; font-size:0.7rem;">Delivery: ₱{{ '%.2f'|format(biz.deposit_flat_amount) }} flat deposit auto-applied</small>
                     </div>
                 </div>
 
@@ -219,7 +222,7 @@
                     </div>
                 </div>
 
-                <div id="rent-delivery-fields" class="full-width" style="display: none; grid-template-columns: 1fr 1fr 120px; gap: 12px;">
+                <div id="rent-delivery-fields" class="full-width" style="display: none; grid-template-columns: 1fr 1fr 1fr 120px; gap: 12px;">
                     <div class="form-field"> 
                         <label>Delivery Address</label>
                         <input type="text" name="delivery_address" class="clinical-input" placeholder="House #, Street, Brgy...">
@@ -227,6 +230,10 @@
                     <div class="form-field"> 
                         <label>Landmark</label>
                         <input type="text" name="landmark" class="clinical-input" placeholder="Near church, blue gate, etc.">
+                    </div>
+                    <div class="form-field">
+                        <label>Distance (km)</label>
+                        <input type="number" id="rent-distance-km" name="distance_km" class="clinical-input" min="0.1" step="0.1" placeholder="e.g. 5.0">
                     </div>
                     <div class="form-field"> 
                         <label>Delivery Fee (₱)</label>

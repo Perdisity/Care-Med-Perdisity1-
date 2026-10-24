@@ -8,6 +8,8 @@ from functools import wraps
 from models.product import Product, InventoryLog, Transaction, Purchase, Payment, Rental, RentalInvoice, Expense, PaymentProof, TankStatus, RentalTank, RentalTankLog, CustomerDeposit
 from models.customer import Customer
 from models.users import User, SecurityLog, BlockedIP, Permission
+from models.settings import SystemSetting
+from models.operations import StockAdjustment, VoidRequest
 from flask_mail import Message
 from flask import current_app
 from werkzeug.utils import secure_filename
@@ -19,6 +21,16 @@ import os
 import uuid
 import random, string
 from utils.backup import create_backup, get_all_backups
+from utils.report_exports import (
+    build_inventory_export,
+    build_movements_export,
+    build_rentals_export,
+    build_sales_export,
+    build_supplier_export,
+    build_tank_export,
+    parse_range,
+    xlsx_response,
+)
 from flask import send_file, Response, stream_with_context
 import json
 import time
@@ -26,6 +38,47 @@ from sqlalchemy import case, func
 
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/admin')
+
+# Chapter III stakeholder roles → default permission bundles. Administrators
+# always bypass permission checks; these presets make Staff accounts match the
+# duties described in the thesis, while the edit modal still allows overrides.
+ROLE_PRESETS = {
+    'Owner/Admin': {
+        'role': 'Administrator',
+        'can_manage_customers': True,
+        'can_verify_customers': True,
+        'can_manage_products': True,
+        'can_update_stock': True,
+        'can_process_transactions': True,
+        'can_confirm_payments': True,
+        'can_export_transactions': True,
+        'can_manage_expenses': True,
+        'can_view_reports': True,
+        'can_view_logs': True,
+        'can_view_active_rentals': True,
+    },
+    'Counter Staff': {
+        'role': 'Staff',
+        'can_manage_customers': True,
+        'can_verify_customers': True,
+        'can_process_transactions': True,
+        'can_confirm_payments': True,
+        'can_view_active_rentals': True,
+    },
+    'Inventory Custodian': {
+        'role': 'Staff',
+        'can_manage_products': True,
+        'can_update_stock': True,
+        'can_process_transactions': True,
+        'can_view_logs': True,
+        'can_view_reports': True,
+        'can_view_active_rentals': True,
+    },
+    'Delivery Personnel': {
+        'role': 'Staff',
+        'can_view_active_rentals': True,
+    },
+}
 
 def admin_or_staff_required(f):
     @wraps(f)
@@ -324,7 +377,7 @@ def dashboard_data():
         product_stats = (
             db.session.query(
                 func.coalesce(func.sum(Product.stock), 0),
-                func.coalesce(func.sum(case((Product.stock <= 5, 1), else_=0)), 0)
+                func.coalesce(func.sum(case((Product.stock <= Product.reorder_level, 1), else_=0)), 0)
             )
             .filter(Product.is_active == True, Product.is_refillable == False)
             .first()
@@ -1091,7 +1144,7 @@ def products():
     # ── filter deep-links from notifications ──────────────────────────────
     if filter_type == 'low_stock':
         query = query.filter(
-            Product.stock <= 5,
+            Product.stock <= Product.reorder_level,
             Product.stock > 0,
             Product.status != 'Archived'
         )
@@ -1115,7 +1168,11 @@ def products():
  
     stats = {
         'total_inventory':    db.session.query(func.sum(Product.stock)).scalar() or 0,
-        'low_stock_count':    Product.query.filter(Product.stock <= 5).count(),
+        'low_stock_count':    Product.query.filter(
+            Product.stock <= Product.reorder_level,
+            Product.stock > 0,
+            Product.status != 'Archived'
+        ).count(),
         'available_for_rent': Product.query.filter_by(status='Available').count()
     }
  
@@ -1167,6 +1224,8 @@ def add_product():
 
     try:
         stock = int(request.form.get("stock", 0))
+        default_reorder = int(SystemSetting.value_of("default_reorder_level") or 5)
+        reorder_level = int(request.form.get("reorder_level") or default_reorder)
         rent_price_raw = request.form.get("rent_price", "").strip()
         sale_price_raw = request.form.get("sale_price", "").strip()
         cost_price_raw = request.form.get("cost_price", "").strip()
@@ -1192,6 +1251,8 @@ def add_product():
         
         if stock < 0:
             raise ValueError("Stock cannot be negative.")
+        if reorder_level < 0:
+            raise ValueError("Reorder level cannot be negative.")
         
     except (ValueError, InvalidOperation):
         flash("Oops! Please double-check the stock and price fields. Ensure you've entered valid numbers.", "error")
@@ -1230,6 +1291,7 @@ def add_product():
             size=size, 
             description=description, 
             stock=stock,
+            reorder_level=reorder_level,
             is_refillable=is_refillable,
             transaction_type=transaction_type,    
             rent_period=rent_period,    
@@ -1256,8 +1318,11 @@ def add_product():
 
         log = InventoryLog(
             product_id=new_product.id,
+            reference_no=f"PRD-{new_product.id:05d}",
+            reason_code="OPENING",
             action="Initial Stock Entry",
             quantity=stock,
+            balance_after=stock,
             note=f"Registered {name} (Size: {size}). Mode: {transaction_type}. Refillable: {is_refillable}. Condition: {condition}. Cost: {cost_price}",
             user_id=current_user.id,
             user_name=current_user.full_name 
@@ -1328,6 +1393,13 @@ def edit_product(product_id):
     try:
         raw_rent = Decimal(request.form.get("rent_price") or "0.00")
         raw_sale = Decimal(request.form.get("sale_price") or "0.00")
+        new_reorder = int(
+            request.form.get("reorder_level")
+            or SystemSetting.value_of("default_reorder_level")
+            or 5
+        )
+        if new_reorder < 0:
+            raise ValueError("Reorder level cannot be negative.")
 
         new_rent = raw_rent if new_offer_type in ['Both', 'Rental'] else Decimal("0.00")
         new_sale = raw_sale if new_offer_type in ['Both', 'Sale'] else Decimal("0.00")
@@ -1367,6 +1439,12 @@ def edit_product(product_id):
         if product.sale_price != new_sale:
             changes.append(f"Changed sale price to ₱{new_sale:,.2f}")
             product.sale_price = new_sale
+
+        if (product.reorder_level or 0) != new_reorder:
+            changes.append(
+                f"Changed reorder level from {product.reorder_level or 0} to {new_reorder}"
+            )
+            product.reorder_level = new_reorder
 
     except (ValueError, InvalidOperation):
         flash("Oops! Please double-check your pricing fields. Ensure you've entered valid numbers.", "error")
@@ -1476,8 +1554,10 @@ def update_stock(product_id):
 
         db.session.add(InventoryLog(
             product_id=product.id,
+            reason_code="RESTOCK",
             action="Restock",
             quantity=increment,
+            balance_after=product.stock,
             note=log_note[:255],
             user_id=current_user.id,
             user_name=current_user.full_name
@@ -1772,8 +1852,12 @@ def process_purchase():
 
             db.session.add(InventoryLog(
                 product_id=product.id,
+                transaction_id=new_transaction.id,
+                reference_no=ref_no,
+                reason_code="SALE",
                 action="SALE",
                 quantity=-quantity,
+                balance_after=product.stock,
                 note=f"Sold {quantity} via {ref_no}",
                 user_id=current_user.id,
                 user_name=getattr(current_user, 'full_name', 'System Administrator')
@@ -1880,6 +1964,29 @@ def process_rental():
         if customer_deposit < 0:
             flash("Customer deposit cannot be negative.", "danger")
             return redirect(request.referrer or url_for('admin.transactions'))
+
+        # FR02 / RULE-03: delivery rentals carry a flat, owner-configurable deposit.
+        # The distance is still captured because it drives the delivery fee and is
+        # part of the transaction record required by the thesis.
+        distance_km = None
+        deposit_rule = None
+        if fulfillment_type == 'Delivery':
+            raw_distance = request.form.get('distance_km')
+            if isinstance(raw_distance, list):
+                raw_distance = raw_distance[0]
+            try:
+                distance_km = Decimal(str(raw_distance or '').replace(',', ''))
+            except (ValueError, TypeError, InvalidOperation):
+                flash("Please enter the delivery distance in kilometres.", "danger")
+                return redirect(request.referrer or url_for('admin.transactions'))
+            if distance_km <= 0:
+                flash("Delivery distance must be greater than zero.", "danger")
+                return redirect(request.referrer or url_for('admin.transactions'))
+
+            customer_deposit = Decimal(
+                str(SystemSetting.value_of('deposit_flat_amount') or '0')
+            ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            deposit_rule = "Flat delivery deposit"
 
         try:
             raw_voucher = request.form.get('voucher_amount') or request.form.get('voucher') or request.form.get('discount') or '0'
@@ -1988,6 +2095,8 @@ def process_rental():
             has_initial_fill=has_initial_fill,
             initial_fill_cost=initial_fill_cost,
             deposit_amount=customer_deposit,
+            distance_km=distance_km,
+            deposit_rule=deposit_rule,
             status="Open"
         )
 
@@ -2112,8 +2221,15 @@ def process_rental():
 
             db.session.add(InventoryLog(
                 product_id=product.id,
+                transaction_id=new_txn.id,
+                reference_no=ref_no,
+                reason_code="RENTAL",
                 action="RENTAL",
-                quantity=qty if not product.is_refillable else 0,  
+                quantity=qty if not product.is_refillable else 0,
+                balance_after=(
+                    product.tank_status.full_in_stock
+                    if product.tank_status else product.stock
+                ),
                 note=log_note,
                 user_id=current_user.id,
                 user_name=getattr(current_user, 'full_name', 'System Administrator')
@@ -2273,7 +2389,7 @@ def process_rental():
 def product_history(product_id):
     try:
         logs = InventoryLog.query.filter_by(product_id=product_id)\
-            .order_by(InventoryLog.created_at.desc())\
+            .order_by(InventoryLog.created_at.desc(), InventoryLog.id.desc())\
             .limit(100)\
             .all()
 
@@ -2298,6 +2414,9 @@ def product_history(product_id):
                 "movement_type": movement_type, 
                 "note": log.note or "No additional notes.",
                 "user": log.user_name or "System",
+                "reference": log.reference_no,
+                "reason": log.reason_code,
+                "balance_after": log.balance_after,
                 "date": log.created_at.strftime("%b %d, %Y"),
                 "time": log.created_at.strftime("%I:%M %p"),
                 "timestamp": log.created_at.isoformat() 
@@ -2341,11 +2460,19 @@ def transactions():
     )
 
     if search_query:
+        like = f"%{search_query}%"
+        product_match = or_(
+            Product.name.ilike(like),
+            Product.equipment_type.ilike(like),
+        )
         query = query.outerjoin(Rental, Rental.transaction_id == Transaction.id).filter(or_(
-            Transaction.reference_no.ilike(f"%{search_query}%"),
-            Transaction.customer_name.ilike(f"%{search_query}%"),
-            Transaction.landmark.ilike(f"%{search_query}%"),
-            Rental.serial_number.ilike(f"%{search_query}%")
+            Transaction.reference_no.ilike(like),
+            Transaction.customer_name.ilike(like),
+            Transaction.landmark.ilike(like),
+            Rental.tanks.any(RentalTank.serial_number.ilike(like)),
+            Transaction.purchases.any(Purchase.product.has(product_match)),
+            Transaction.rentals.any(Rental.product.has(product_match)),
+            Transaction.product.has(product_match),
         )).distinct()
     
     if txn_type:
@@ -2510,9 +2637,103 @@ def transactions():
         **stats
     )
 
+def _apply_transaction_cancellation(txn, reason, actor=None):
+    """Reverse stock effects for a void. Used by admins and by approval of a
+    staff request (Table 15: reference number, reason, admin approval)."""
+    txn.status = 'Cancelled'
+    txn.tracking_status = 'CANCELLED'
+    if hasattr(txn, 'cancellation_reason'):
+        txn.cancellation_reason = reason
+
+    actor_id = getattr(actor, 'id', None)
+    actor_name = getattr(actor, 'full_name', 'System Administrator')
+
+    if txn.transaction_type == 'Sale' and txn.purchases:
+        for purchase in txn.purchases:
+            product = purchase.product
+            if product and purchase.quantity:
+                product.stock = (product.stock or 0) + purchase.quantity
+                db.session.add(InventoryLog(
+                    product_id=product.id,
+                    transaction_id=txn.id,
+                    reference_no=txn.reference_no,
+                    reason_code='VOID_SALE',
+                    action='Transaction Cancelled Restock',
+                    quantity=purchase.quantity,
+                    balance_after=product.stock,
+                    note=f'Restocked from cancelled txn {txn.reference_no}. Reason: {reason}',
+                    user_id=actor_id,
+                    user_name=actor_name,
+                ))
+
+    elif txn.transaction_type == 'Rental' and txn.rentals:
+        for rental in txn.rentals:
+            rental.status = 'Cancelled'
+            for invoice in rental.invoices:
+                if invoice.status != 'Paid':
+                    invoice.status = 'Cancelled'
+
+            if rental.product:
+                remaining = rental.remaining_to_return or 0
+                balance_after = rental.product.stock
+                if rental.product.tank_status:
+                    tank_info = rental.product.tank_status
+                    tank_info.rented_out = max(
+                        0, (tank_info.rented_out or 0) - remaining
+                    )
+                    tank_info.full_in_stock = (
+                        tank_info.full_in_stock or 0
+                    ) + remaining
+                    balance_after = tank_info.full_in_stock
+                    db.session.add(tank_info)
+                else:
+                    rental.product.stock = (
+                        rental.product.stock or 0
+                    ) + remaining
+                    balance_after = rental.product.stock
+                    if rental.product.stock > 0:
+                        rental.product.status = 'Available'
+
+                db.session.add(InventoryLog(
+                    product_id=rental.product.id,
+                    transaction_id=txn.id,
+                    reference_no=txn.reference_no,
+                    reason_code='VOID_RENTAL',
+                    action='Rental Transaction Cancelled Restock',
+                    quantity=remaining,
+                    balance_after=balance_after,
+                    note=f'Restocked from cancelled rental txn {txn.reference_no}. Reason: {reason}',
+                    user_id=actor_id,
+                    user_name=actor_name,
+                ))
+
+    elif txn.transaction_type == 'Refill' and txn.product_id:
+        product = Product.query.get(txn.product_id)
+        if product and txn.quantity:
+            product.stock = (product.stock or 0) + txn.quantity
+            db.session.add(InventoryLog(
+                product_id=product.id,
+                transaction_id=txn.id,
+                reference_no=txn.reference_no,
+                reason_code='VOID_REFILL',
+                action='Refill Transaction Cancelled Restock',
+                quantity=txn.quantity,
+                balance_after=product.stock,
+                note=f'Restocked from cancelled refill txn {txn.reference_no}. Reason: {reason}',
+                user_id=actor_id,
+                user_name=actor_name,
+            ))
+
+    txn.amount_paid = Decimal('0.00')
+    txn.balance_due = Decimal('0.00')
+    if hasattr(txn, 'payment_status'):
+        txn.payment_status = 'Cancelled'
+
+
 @admin_bp.route('/transactions/cancel/<int:txn_id>', methods=['POST'])
 @login_required
 @admin_or_staff_required
+@permission_required('can_process_transactions')
 def cancel_transaction(txn_id):
     try:
         txn = Transaction.query.get_or_404(txn_id)
@@ -2526,68 +2747,30 @@ def cancel_transaction(txn_id):
         if not reason:
             return jsonify({'success': False, 'message': 'A cancellation reason is required.'}), 400
 
-        txn.status = 'Cancelled'
-        txn.tracking_status = 'CANCELLED'
-        
-        if hasattr(txn, 'cancellation_reason'):
-            txn.cancellation_reason = reason
+        # Table 15: staff requests must be approved by an Administrator.
+        if (current_user.role or '').strip() != 'Administrator':
+            existing = VoidRequest.query.filter_by(
+                transaction_id=txn.id, status='Pending'
+            ).first()
+            if existing:
+                return jsonify({
+                    'success': False,
+                    'message': 'A void request for this transaction is already awaiting approval.'
+                }), 400
+            db.session.add(VoidRequest(
+                transaction_id=txn.id,
+                reason=reason,
+                requested_by_id=current_user.id,
+                status='Pending',
+            ))
+            db.session.commit()
+            return jsonify({
+                'success': True,
+                'pending': True,
+                'message': 'Void request submitted. An Administrator must approve it before stock is restored.'
+            }), 202
 
-        if txn.transaction_type == 'Sale' and txn.purchases:
-            for purchase in txn.purchases:
-                product = purchase.product
-                if product and purchase.quantity:
-                    product.stock = (product.stock or 0) + purchase.quantity
-                    
-                    inv_log = InventoryLog(
-                        product_id=product.id,
-                        action='Transaction Cancelled Restock',
-                        quantity=purchase.quantity,
-                        note=f'Restocked from cancelled txn {txn.reference_no}. Reason: {reason}',
-                        user_id=current_user.id if hasattr(current_user, 'id') else None,
-                        user_name=getattr(current_user, 'username', 'Admin')
-                    )
-                    db.session.add(inv_log)
-
-        elif txn.transaction_type == 'Rental' and txn.rentals:
-            for rental in txn.rentals:
-                rental.status = 'Cancelled'
-                for invoice in rental.invoices:
-                    if invoice.status != 'Paid':
-                        invoice.status = 'Cancelled'
-
-                if rental.product:
-                    rental.product.stock = (rental.product.stock or 0) + rental.remaining_to_return
-                    
-                    inv_log = InventoryLog(
-                        product_id=rental.product.id,
-                        action='Rental Transaction Cancelled Restock',
-                        quantity=rental.remaining_to_return,
-                        note=f'Restocked from cancelled rental txn {txn.reference_no}. Reason: {reason}',
-                        user_id=current_user.id if hasattr(current_user, 'id') else None,
-                        user_name=getattr(current_user, 'username', 'Admin')
-                    )
-                    db.session.add(inv_log)
-
-        elif txn.transaction_type == 'Refill' and txn.product_id:
-            product = Product.query.get(txn.product_id)
-            if product and txn.quantity:
-                product.stock = (product.stock or 0) + txn.quantity
-                
-                inv_log = InventoryLog(
-                    product_id=product.id,
-                    action='Refill Transaction Cancelled Restock',
-                    quantity=txn.quantity,
-                    note=f'Restocked from cancelled refill txn {txn.reference_no}. Reason: {reason}',
-                    user_id=current_user.id if hasattr(current_user, 'id') else None,
-                    user_name=getattr(current_user, 'username', 'Admin')
-                )
-                db.session.add(inv_log)
-
-        txn.amount_paid = Decimal('0.00')
-        txn.balance_due = Decimal('0.00')
-        if hasattr(txn, 'payment_status'):
-            txn.payment_status = 'Cancelled'
-            
+        _apply_transaction_cancellation(txn, reason, current_user)
         db.session.commit()
 
         return jsonify({
@@ -2696,17 +2879,41 @@ def export_transactions():
     txn_type = request.args.get('type', '')
     fulfillment = request.args.get('fulfillment', '')
     status_filter = request.args.get('status', '')
+    start_date_str = request.args.get('start_date', '').strip()
+    end_date_str = request.args.get('end_date', '').strip()
 
     query = Transaction.query.options(
         joinedload(Transaction.customer),
         selectinload(Transaction.rentals)
     )
 
+    if start_date_str:
+        try:
+            query = query.filter(
+                Transaction.created_at >= datetime.strptime(start_date_str, '%Y-%m-%d')
+            )
+        except ValueError:
+            flash("Invalid start date for export; ignored.", "warning")
+    if end_date_str:
+        try:
+            exclusive_end = datetime.strptime(end_date_str, '%Y-%m-%d') + timedelta(days=1)
+            query = query.filter(Transaction.created_at < exclusive_end)
+        except ValueError:
+            flash("Invalid end date for export; ignored.", "warning")
+
     if search_query:
+        like = f"%{search_query}%"
+        product_match = or_(
+            Product.name.ilike(like),
+            Product.equipment_type.ilike(like),
+        )
         query = query.filter(or_(
-            Transaction.reference_no.ilike(f"%{search_query}%"),
-            Transaction.customer_name.ilike(f"%{search_query}%"),
-            Transaction.landmark.ilike(f"%{search_query}%")
+            Transaction.reference_no.ilike(like),
+            Transaction.customer_name.ilike(like),
+            Transaction.landmark.ilike(like),
+            Transaction.purchases.any(Purchase.product.has(product_match)),
+            Transaction.rentals.any(Rental.product.has(product_match)),
+            Transaction.product.has(product_match),
         ))
     if txn_type:
         query = query.filter(Transaction.transaction_type == txn_type)
@@ -2733,7 +2940,11 @@ def export_transactions():
     center_align = Alignment(horizontal="center", vertical="center")
     right_align = Alignment(horizontal="right", vertical="center")
 
-    headers = ['Reference No', 'Customer Name', 'Type', 'Fulfillment', 'Total Amount', 'Amount Paid', 'Balance Due', 'Status', 'Date']
+    headers = [
+        'Reference No', 'Customer Name', 'Type', 'Fulfillment', 'Total Amount',
+        'Amount Paid', 'Balance Due', 'Deposit Held', 'Distance (km)',
+        'Deposit Rule', 'Status', 'Date',
+    ]
     ws.append(headers)
 
     for col_num, header in enumerate(headers, 1):
@@ -2754,21 +2965,22 @@ def export_transactions():
             txn.total_amount,
             txn.amount_paid,
             txn.balance_due,
+            txn.deposit_amount,
+            txn.distance_km,
+            txn.deposit_rule,
             txn.status,
             txn_date
         ]
         ws.append(row_data)
         
         current_row = ws.max_row
-        ws.cell(row=current_row, column=5).number_format = '"₱"#,##0.00' 
-        ws.cell(row=current_row, column=6).number_format = '"₱"#,##0.00' 
-        ws.cell(row=current_row, column=7).number_format = '"₱"#,##0.00' 
-        
-        ws.cell(row=current_row, column=5).alignment = right_align
-        ws.cell(row=current_row, column=6).alignment = right_align
-        ws.cell(row=current_row, column=7).alignment = right_align
-        ws.cell(row=current_row, column=8).alignment = center_align
-        ws.cell(row=current_row, column=9).alignment = center_align
+        for money_col in (5, 6, 7, 8):
+            cell = ws.cell(row=current_row, column=money_col)
+            cell.number_format = '"₱"#,##0.00'
+            cell.alignment = right_align
+        ws.cell(row=current_row, column=9).alignment = right_align
+        for center_col in (4, 11, 12):
+            ws.cell(row=current_row, column=center_col).alignment = center_align
 
     # Auto-fit column widths
     for col in ws.columns:
@@ -3184,6 +3396,14 @@ def process_return(txn_id):
     try:
         user_display_name = f"{current_user.first_name} {current_user.last_name}"
         items_processed = 0
+        computed_late_fees = Decimal('0.00')
+        late_rate = Decimal(str(SystemSetting.value_of('late_fee_per_day') or '0'))
+        deposit_held = Decimal(str(txn.deposit_amount or 0))
+        minor_pct = Decimal(str(SystemSetting.value_of('damage_fee_minor_pct') or 0))
+        major_pct = Decimal(str(SystemSetting.value_of('damage_fee_major_pct') or 0))
+        percent_damage_total = Decimal('0.00')
+        damage_fee_total = Decimal('0.00')
+        today = datetime.utcnow().date()
 
         for item_id in returned_item_ids:
             rental = Rental.query.get(int(item_id))
@@ -3197,6 +3417,19 @@ def process_return(txn_id):
                 qty_to_return = rental.remaining_to_return
             
             if qty_to_return > 0:
+                # RULE-09: days overdue x daily rate x units actually returned.
+                days_late = 0
+                if rental.expected_return_date and today > rental.expected_return_date:
+                    days_late = (today - rental.expected_return_date).days
+                item_late_fee = (late_rate * days_late * qty_to_return).quantize(
+                    Decimal('0.01'), rounding=ROUND_HALF_UP
+                )
+                if item_late_fee > 0:
+                    computed_late_fees += item_late_fee
+                    rental.late_fees_incurred = (
+                        Decimal(str(rental.late_fees_incurred or 0)) + item_late_fee
+                    )
+
                 rental.quantity_returned = (rental.quantity_returned or 0) + qty_to_return
                 if rental.quantity_returned >= rental.quantity:
                     rental.status = 'Returned'
@@ -3205,39 +3438,153 @@ def process_return(txn_id):
                     rental.status = 'Partially Returned'
                 
                 return_status = request.form.get(f'status_{item_id}', 'Full')
+                condition = (request.form.get(f'condition_{item_id}') or 'Good').strip()
+                if condition not in ('Good', 'Minor Damage', 'Major Damage', 'Total Loss'):
+                    condition = 'Good'
 
-                if rental.product.tank_status:
+                # RULE-10: assess the damage fee against the held deposit.
+                item_damage_fee = Decimal('0.00')
+                if condition == 'Minor Damage':
+                    item_damage_fee = (
+                        deposit_held * minor_pct / Decimal('100') * qty_to_return
+                    ).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                    percent_damage_total += item_damage_fee
+                elif condition == 'Major Damage':
+                    item_damage_fee = (
+                        deposit_held * major_pct / Decimal('100') * qty_to_return
+                    ).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                    percent_damage_total += item_damage_fee
+                elif condition == 'Total Loss':
+                    cash_value = Decimal(str(rental.product.sale_price or 0))
+                    if cash_value <= 0:
+                        cash_value = Decimal(str(rental.product.cost_price or 0))
+                    if cash_value <= 0:
+                        cash_value = deposit_held
+                    item_damage_fee = (cash_value * qty_to_return).quantize(
+                        Decimal('0.01'), rounding=ROUND_HALF_UP
+                    )
+                    damage_fee_total += item_damage_fee
+
+                rental.return_condition = condition
+                rental.damage_fee = (rental.damage_fee or 0) + item_damage_fee
+                log_balance = rental.product.stock or 0
+
+                if condition == 'Total Loss':
+                    # The asset is gone: remove it from the tank registry without
+                    # returning it to sellable stock.
+                    if rental.product.tank_status:
+                        tank_info = rental.product.tank_status
+                        tank_info.rented_out = max(
+                            0, (tank_info.rented_out or 0) - qty_to_return
+                        )
+                        tank_info.total_owned = max(
+                            0, (tank_info.total_owned or 0) - qty_to_return
+                        )
+                        rental.product.stock = max(
+                            0, (rental.product.stock or 0) - qty_to_return
+                        )
+                        log_balance = tank_info.full_in_stock or 0
+                        db.session.add(tank_info)
+                    db.session.add(rental.product)
+                    log_reason = "RETURN_TOTAL_LOSS"
+                    log_qty = 0
+
+                elif condition in ('Minor Damage', 'Major Damage'):
+                    # Returned but not rentable until repaired.
+                    if rental.product.tank_status:
+                        tank_info = rental.product.tank_status
+                        tank_info.rented_out = max(
+                            0, (tank_info.rented_out or 0) - qty_to_return
+                        )
+                        tank_info.damaged_in_stock = (
+                            tank_info.damaged_in_stock or 0
+                        ) + qty_to_return
+                        log_balance = tank_info.damaged_in_stock
+                        db.session.add(tank_info)
+                    else:
+                        rental.product.damaged_stock = (
+                            rental.product.damaged_stock or 0
+                        ) + qty_to_return
+                        log_balance = rental.product.damaged_stock
+                    db.session.add(rental.product)
+                    log_reason = "RETURN_DAMAGED"
+                    log_qty = 0
+
+                elif rental.product.tank_status:
                     tank_info = rental.product.tank_status
 
                     tank_info.rented_out = max(0, (tank_info.rented_out or 0) - qty_to_return)
 
                     if return_status == 'Empty':
                         tank_info.empty_in_stock = (tank_info.empty_in_stock or 0) + qty_to_return
+                        log_balance = tank_info.empty_in_stock
                     else:
                         tank_info.full_in_stock = (tank_info.full_in_stock or 0) + qty_to_return
-                        rental.product.stock = (rental.product.stock or 0) + qty_to_return
+                        log_balance = tank_info.full_in_stock
                     
                     if rental.product.stock > 0:
                         rental.product.status = "Available"
                         
                     db.session.add(tank_info)
                     db.session.add(rental.product)
+                    log_reason = "RETURN"
+                    log_qty = qty_to_return
 
                 else:
                     rental.product.stock = (rental.product.stock or 0) + qty_to_return
+                    log_balance = rental.product.stock
                     if rental.product.stock > 0:
                         rental.product.status = "Available"
                     db.session.add(rental.product)
+                    log_reason = "RETURN"
+                    log_qty = qty_to_return
 
                 db.session.add(InventoryLog(
                     product_id=rental.product.id,
+                    transaction_id=txn.id,
+                    reference_no=txn.reference_no,
+                    reason_code=log_reason,
                     action="Equipment Return",
-                    quantity=qty_to_return,
-                    note=f"Txn {txn.reference_no} Return. Status: {return_status}. {return_notes}",
+                    quantity=log_qty,
+                    balance_after=log_balance,
+                    note=(
+                        f"Txn {txn.reference_no} Return. Condition: {condition}. "
+                        f"Tank status: {return_status}. {return_notes}"
+                    ),
                     user_id=current_user.id,
                     user_name=user_display_name
                 ))
                 items_processed += 1
+
+        # Percentage-based damage is capped at the deposit actually held.
+        damage_fee_total += min(percent_damage_total, deposit_held)
+        damage_fee_total = damage_fee_total.quantize(
+            Decimal('0.01'), rounding=ROUND_HALF_UP
+        )
+
+        # The computed amount is authoritative unless an Administrator overrides
+        # it with a positive value. A blank/zero field means "use the computed fee".
+        if late_fees <= 0:
+            late_fees = computed_late_fees
+        elif late_fees != computed_late_fees:
+            if (current_user.role or '').strip() == 'Administrator':
+                db.session.add(SecurityLog(
+                    event_type="Late Fee Override",
+                    description=(
+                        f"Txn {txn.reference_no}: late fee changed from "
+                        f"₱{computed_late_fees:,.2f} (computed) to ₱{late_fees:,.2f}."
+                    ),
+                    user_id=current_user.id,
+                    user_email=current_user.email,
+                    severity="Medium",
+                ))
+            else:
+                flash(
+                    f"Late fee was auto-computed as ₱{computed_late_fees:,.2f} "
+                    f"(₱{late_rate:,.2f}/day per unit). Only an Administrator can override it.",
+                    "info",
+                )
+                late_fees = computed_late_fees
 
         if late_fees > 0:
             payment = Payment(
@@ -3249,20 +3596,51 @@ def process_return(txn_id):
             )
             db.session.add(payment)
 
+        net_deposit_refund = Decimal('0.00')
         if refund_deposit and deposit_refund_amount > 0:
+            net_deposit_refund = max(
+                Decimal('0.00'), deposit_refund_amount - damage_fee_total
+            )
             held_deposits = CustomerDeposit.query.filter_by(transaction_id=txn.id, status='Held').all()
             for deposit in held_deposits:
-                deposit.status = 'Refunded'
+                deposit_amount = Decimal(str(deposit.amount or 0))
+                if deposit_amount > 0 and damage_fee_total >= deposit_amount:
+                    deposit.status = 'Forfeited'
+                elif net_deposit_refund >= deposit_amount and deposit_amount > 0:
+                    deposit.status = 'Refunded'
+                elif net_deposit_refund > 0:
+                    deposit.status = 'Partially Refunded'
+                else:
+                    deposit.status = 'Forfeited'
+                if damage_fee_total > 0:
+                    deposit.notes = (
+                        f"{deposit.notes or ''} Damage fee ₱{damage_fee_total:,.2f} "
+                        f"deducted on return.".strip()
+                    )
                 db.session.add(deposit)
 
-            deposit_payout = Payment(
-                transaction_id=txn.id,
-                amount=deposit_refund_amount,
-                payment_method=payment_method,
-                payment_type="Deposit Refund",
-                status="Completed",
-            )
-            db.session.add(deposit_payout)
+            if net_deposit_refund > 0:
+                deposit_payout = Payment(
+                    transaction_id=txn.id,
+                    amount=net_deposit_refund,
+                    payment_method=payment_method,
+                    payment_type="Deposit Refund",
+                    status="Completed",
+                )
+                db.session.add(deposit_payout)
+
+        elif damage_fee_total > 0:
+            # A total loss can consume the entire deposit without a refund action.
+            held_deposits = CustomerDeposit.query.filter_by(transaction_id=txn.id, status='Held').all()
+            for deposit in held_deposits:
+                deposit_amount = Decimal(str(deposit.amount or 0))
+                if deposit_amount > 0 and damage_fee_total >= deposit_amount:
+                    deposit.status = 'Forfeited'
+                    deposit.notes = (
+                        f"{deposit.notes or ''} Deposit forfeited: damage fee "
+                        f"₱{damage_fee_total:,.2f} meets or exceeds the deposit.".strip()
+                    )
+                    db.session.add(deposit)
 
         if txn.rentals and all(r.status == 'Returned' for r in txn.rentals):
             txn.status = 'Closed'
@@ -3272,8 +3650,12 @@ def process_return(txn_id):
         db.session.commit()
         
         success_msg = f"Successfully processed return for {items_processed} item(s)."
+        if damage_fee_total > 0:
+            success_msg += (
+                f" Damage fee assessed: ₱{damage_fee_total:,.2f}, deducted from the deposit."
+            )
         if refund_deposit and deposit_refund_amount > 0:
-            success_msg += f" Deposit refund of ₱{deposit_refund_amount:.2f} processed."
+            success_msg += f" Net deposit refund: ₱{net_deposit_refund:,.2f}."
         flash(success_msg, "success")
 
     except Exception as e:
@@ -3319,9 +3701,24 @@ def process_primegas():
     tank_status.empty_in_stock -= quantity
     tank_status.full_in_stock += quantity
 
+    db.session.add(InventoryLog(
+        product_id=tank_status.product_id,
+        reason_code="REFILL",
+        action="Primegas Tank Refill",
+        quantity=0,
+        balance_after=tank_status.product.stock if tank_status.product else None,
+        note=(
+            f"Primegas refill: {quantity} empty tank(s) converted to full. "
+            f"Empty: {tank_status.empty_in_stock}, Full: {tank_status.full_in_stock}."
+        ),
+        user_id=current_user.id,
+        user_name=getattr(current_user, 'full_name', 'System Administrator')
+    ))
+
     new_expense = Expense(
         category="Primegas Refill",
         expense_title=f"Refilled {quantity} units",
+        refill_quantity=quantity,
         amount=amount,
         description=f"Primegas transaction processing batch refill for Product ID: {product_id}",
         product_id=product_id,
@@ -3334,11 +3731,271 @@ def process_primegas():
     flash(f'Successfully refilled {quantity} tank(s) and recorded expense!', 'success')
     return redirect(url_for('admin.transactions'))
 
+ADJUSTMENT_REASONS = [
+    'Physical Count', 'Damaged', 'Lost', 'Return to Supplier',
+    'Data Entry Error', 'Other',
+]
+
+
+def _apply_stock_adjustment(adjustment, reviewer):
+    """Apply the count delta so movements after the count are preserved."""
+    product = adjustment.product
+    delta = adjustment.counted_qty - adjustment.system_qty
+    balance_after = (product.stock or 0) + delta
+
+    if product.tank_status:
+        tank = product.tank_status
+        tank.full_in_stock = max(0, (tank.full_in_stock or 0) + delta)
+        tank.total_owned = (
+            (tank.full_in_stock or 0)
+            + (tank.empty_in_stock or 0)
+            + (tank.rented_out or 0)
+            + (tank.damaged_in_stock or 0)
+        )
+        balance_after = tank.full_in_stock
+        db.session.add(tank)
+
+    product.stock = max(0, (product.stock or 0) + delta)
+    product.status = 'Available' if product.stock > 0 else 'Out of Stock'
+    db.session.add(product)
+
+    adjustment.status = 'Approved'
+    adjustment.reviewed_by_id = reviewer.id
+    adjustment.reviewed_at = datetime.utcnow()
+
+    db.session.add(InventoryLog(
+        product_id=product.id,
+        reference_no=f"ADJ-{adjustment.id:05d}",
+        reason_code='ADJUSTMENT',
+        action=f"Physical Count — {adjustment.reason_code}",
+        quantity=delta,
+        balance_after=balance_after,
+        note=(
+            f"Counted {adjustment.counted_qty} vs system {adjustment.system_qty} "
+            f"(variance {delta:+d}). {adjustment.note or ''}"
+        )[:255],
+        user_id=reviewer.id,
+        user_name=reviewer.full_name,
+    ))
+
+
+@admin_bp.route('/adjustments', methods=['GET'])
+@login_required
+@admin_or_staff_required
+@permission_required('can_update_stock')
+def adjustments():
+    pending = (
+        StockAdjustment.query.filter_by(status='Pending')
+        .order_by(StockAdjustment.requested_at.asc())
+        .all()
+    )
+    history = (
+        StockAdjustment.query.filter(StockAdjustment.status != 'Pending')
+        .order_by(StockAdjustment.reviewed_at.desc(), StockAdjustment.requested_at.desc())
+        .limit(25)
+        .all()
+    )
+    products = (
+        Product.query.filter(Product.status != 'Archived')
+        .order_by(Product.equipment_type.asc(), Product.name.asc())
+        .all()
+    )
+    return render_template(
+        'admin/adjustments.html',
+        pending=pending,
+        history=history,
+        products=products,
+        reasons=ADJUSTMENT_REASONS,
+        is_admin=(current_user.role or '').strip() == 'Administrator',
+    )
+
+
+@admin_bp.route('/adjustments/submit', methods=['POST'])
+@login_required
+@admin_or_staff_required
+@permission_required('can_update_stock')
+def submit_adjustment():
+    product = Product.query.get_or_404(request.form.get('product_id', type=int))
+    try:
+        counted_qty = int(request.form.get('counted_qty', ''))
+        if counted_qty < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        flash("Enter a valid non-negative counted quantity.", "danger")
+        return redirect(url_for('admin.adjustments'))
+
+    reason = request.form.get('reason_code', 'Physical Count')
+    if reason not in ADJUSTMENT_REASONS:
+        reason = 'Physical Count'
+
+    system_qty = (
+        (product.tank_status.full_in_stock or 0)
+        if product.tank_status else (product.stock or 0)
+    )
+    adjustment = StockAdjustment(
+        product_id=product.id,
+        system_qty=system_qty,
+        counted_qty=counted_qty,
+        variance=counted_qty - system_qty,
+        reason_code=reason,
+        note=request.form.get('note', '').strip()[:255],
+        requested_by_id=current_user.id,
+        status='Pending',
+    )
+    db.session.add(adjustment)
+    db.session.flush()
+
+    # An Administrator's own count is self-approved; staff counts wait for review.
+    if (current_user.role or '').strip() == 'Administrator':
+        _apply_stock_adjustment(adjustment, current_user)
+        message = (
+            f"Adjustment for {product.name} applied immediately "
+            f"(variance {adjustment.variance:+d})."
+        )
+    else:
+        message = (
+            f"Count submitted for {product.name}. An Administrator must approve it "
+            f"before stock is changed."
+        )
+
+    db.session.commit()
+    flash(message, "success")
+    return redirect(url_for('admin.adjustments'))
+
+
+@admin_bp.route('/adjustments/<int:adjustment_id>/approve', methods=['POST'])
+@login_required
+def approve_adjustment(adjustment_id):
+    if (current_user.role or '').strip() != 'Administrator':
+        abort(403)
+    adjustment = StockAdjustment.query.get_or_404(adjustment_id)
+    if adjustment.status != 'Pending':
+        flash("This adjustment has already been reviewed.", "info")
+        return redirect(url_for('admin.adjustments'))
+
+    _apply_stock_adjustment(adjustment, current_user)
+    adjustment.review_note = request.form.get('review_note', '').strip()[:255]
+    db.session.commit()
+    flash(f"Adjustment for {adjustment.product.name} approved and applied.", "success")
+    return redirect(url_for('admin.adjustments'))
+
+
+@admin_bp.route('/adjustments/<int:adjustment_id>/reject', methods=['POST'])
+@login_required
+def reject_adjustment(adjustment_id):
+    if (current_user.role or '').strip() != 'Administrator':
+        abort(403)
+    adjustment = StockAdjustment.query.get_or_404(adjustment_id)
+    if adjustment.status != 'Pending':
+        flash("This adjustment has already been reviewed.", "info")
+        return redirect(url_for('admin.adjustments'))
+
+    adjustment.status = 'Rejected'
+    adjustment.reviewed_by_id = current_user.id
+    adjustment.reviewed_at = datetime.utcnow()
+    adjustment.review_note = request.form.get('review_note', '').strip()[:255]
+    db.session.commit()
+    flash(f"Adjustment for {adjustment.product.name} rejected.", "info")
+    return redirect(url_for('admin.adjustments'))
+
+
+@admin_bp.route('/inventory-movements')
+@login_required
+@admin_or_staff_required
+@permission_required('can_update_stock')
+def inventory_movements():
+    """Global stock movement log: reference, reason, user, balance (Table 15)."""
+    page = request.args.get('page', 1, type=int)
+    limit = min(max(request.args.get('limit', 25, type=int), 10), 100)
+    product_id = request.args.get('product_id', type=int)
+    reason_filter = request.args.get('reason', '').strip()
+    search_query = request.args.get('q', '').strip()
+    start_str = request.args.get('start_date', '').strip()
+    end_str = request.args.get('end_date', '').strip()
+
+    query = InventoryLog.query.outerjoin(Product)
+
+    if product_id:
+        query = query.filter(InventoryLog.product_id == product_id)
+    if reason_filter:
+        query = query.filter(InventoryLog.reason_code == reason_filter)
+    if search_query:
+        like = f"%{search_query}%"
+        query = query.filter(or_(
+            InventoryLog.reference_no.ilike(like),
+            InventoryLog.note.ilike(like),
+            InventoryLog.action.ilike(like),
+            InventoryLog.user_name.ilike(like),
+            Product.name.ilike(like),
+            Product.equipment_type.ilike(like),
+        ))
+    if start_str:
+        try:
+            query = query.filter(
+                InventoryLog.created_at >= datetime.strptime(start_str, '%Y-%m-%d')
+            )
+        except ValueError:
+            pass
+    if end_str:
+        try:
+            exclusive_end = datetime.strptime(end_str, '%Y-%m-%d') + timedelta(days=1)
+            query = query.filter(InventoryLog.created_at < exclusive_end)
+        except ValueError:
+            pass
+
+    stats = query.with_entities(
+        func.coalesce(
+            func.sum(case((InventoryLog.quantity > 0, InventoryLog.quantity), else_=0)),
+            0,
+        ),
+        func.coalesce(
+            func.sum(case((InventoryLog.quantity < 0, -InventoryLog.quantity), else_=0)),
+            0,
+        ),
+        func.count(InventoryLog.id),
+    ).first()
+
+    pagination = (
+        query.order_by(InventoryLog.created_at.desc(), InventoryLog.id.desc())
+        .paginate(page=page, per_page=limit, error_out=False)
+    )
+
+    products = (
+        Product.query.filter(Product.status != 'Archived')
+        .order_by(Product.equipment_type.asc(), Product.name.asc())
+        .all()
+    )
+    reason_codes = [
+        row[0]
+        for row in db.session.query(InventoryLog.reason_code)
+        .filter(InventoryLog.reason_code.isnot(None))
+        .distinct()
+        .order_by(InventoryLog.reason_code.asc())
+        .all()
+    ]
+
+    return render_template(
+        'admin/inventory_movements.html',
+        pagination=pagination,
+        products=products,
+        reason_codes=reason_codes,
+        product_id=product_id,
+        reason_filter=reason_filter,
+        search_query=search_query,
+        start_date=start_str,
+        end_date=end_str,
+        current_limit=limit,
+        stock_in=int(stats[0] or 0) if stats else 0,
+        stock_out=int(stats[1] or 0) if stats else 0,
+        total_moves=int(stats[2] or 0) if stats else 0,
+    )
+
+
 @admin_bp.route('/system_logs')
 @limiter.exempt
 @login_required
 @admin_or_staff_required
-@permission_required('can_view_reports')
+@permission_required('can_view_logs')
 def system_logs():
     page = request.args.get('page', 1, type=int)
     limit = request.args.get('limit', 10, type=int)
@@ -3350,14 +4007,10 @@ def system_logs():
     query = InventoryLog.query
 
     if search_query:
-        from sqlalchemy import func
         query = query.filter(or_(
             InventoryLog.action.ilike(f'%{search_query}%'),
             InventoryLog.user_name.ilike(f'%{search_query}%'),
             InventoryLog.note.ilike(f'%{search_query}%'),
-            func.date_format(InventoryLog.created_at, '%b %d, %Y').ilike(f'%{search_query}%'),
-            func.date_format(InventoryLog.created_at, '%M %d, %Y').ilike(f'%{search_query}%'),
-            func.date_format(InventoryLog.created_at, '%b %Y').ilike(f'%{search_query}%'),
         ))
 
     if current_type:
@@ -3585,7 +4238,8 @@ def reports():
         Product.equipment_type,
         func.sum(Purchase.quantity).label('units_sold'),
         func.sum(Purchase.total_price).label('revenue'),
-        Product.stock
+        Product.stock,
+        Product.reorder_level
     ).join(Purchase, Purchase.product_id == Product.id)\
      .group_by(Product.id)\
      .order_by(func.sum(Purchase.total_price).desc())\
@@ -3633,8 +4287,9 @@ def reports():
     ).scalar() or 0
  
     low_stock_products = Product.query.filter(
-        Product.stock <= 5,
-        Product.stock > 0
+        Product.stock <= Product.reorder_level,
+        Product.stock > 0,
+        Product.status != 'Archived'
     ).order_by(Product.stock.asc()).all()
  
     out_of_stock_count = Product.query.filter_by(stock=0).count()
@@ -3975,6 +4630,39 @@ def reports():
     )
 
 # Expenses ════════════════════════════════════════════════════════════════════════
+
+@admin_bp.route('/reports/export/<report_type>')
+@login_required
+@admin_or_staff_required
+@permission_required('can_view_reports')
+def export_report(report_type):
+    """CSV/Excel exports for sales, rentals, low stock, tanks and movements."""
+    if report_type not in {
+        'sales', 'rentals', 'inventory', 'low-stock', 'tanks',
+        'movements', 'supplier',
+    }:
+        abort(404)
+
+    start_dt, end_dt = parse_range(request.args)
+
+    if report_type == 'sales':
+        wb = build_sales_export(start_dt, end_dt)
+    elif report_type == 'rentals':
+        wb = build_rentals_export(start_dt, end_dt)
+    elif report_type == 'inventory':
+        wb = build_inventory_export(low_only=False)
+    elif report_type == 'low-stock':
+        wb = build_inventory_export(low_only=True)
+    elif report_type == 'tanks':
+        wb = build_tank_export()
+    elif report_type == 'movements':
+        wb = build_movements_export(start_dt, end_dt)
+    else:
+        wb = build_supplier_export(start_dt, end_dt)
+
+    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    return xlsx_response(wb, f"caremed_{report_type}_{stamp}.xlsx")
+
 
 @admin_bp.route('/expenses')
 @login_required
@@ -4832,7 +5520,7 @@ def _build_notifications():
 
     # ── 6. LOW STOCK ──────────────────────────────────────────────────────
     low_stock = Product.query.filter(
-        Product.stock <= 5,
+        Product.stock <= Product.reorder_level,
         Product.stock > 0,
         Product.status != 'Archived'
     ).all()
@@ -4970,6 +5658,124 @@ def notification_data():
         return jsonify({"count": 0, "notifications": []})
  
 
+@admin_bp.route('/settings', methods=['GET', 'POST'])
+@login_required
+@admin_or_staff_required
+def settings():
+    """Owner/Admin configuration of business rules (Maintainability NFR, Ch. III)."""
+    if (current_user.role or '').strip() != 'Administrator':
+        abort(403)
+
+    if request.method == 'POST':
+        try:
+            deposit_flat = Decimal(request.form.get('deposit_flat_amount', '1500'))
+            late_fee = Decimal(request.form.get('late_fee_per_day', '100'))
+            minor_pct = int(request.form.get('damage_fee_minor_pct', '25'))
+            major_pct = int(request.form.get('damage_fee_major_pct', '50'))
+            default_reorder = int(request.form.get('default_reorder_level', '5'))
+
+            if deposit_flat < 0 or late_fee < 0 or default_reorder < 0:
+                raise ValueError("Amounts and thresholds cannot be negative.")
+            if not (0 <= minor_pct <= 100) or not (0 <= major_pct <= 100):
+                raise ValueError("Damage percentages must be between 0 and 100.")
+            if minor_pct > major_pct:
+                raise ValueError("Minor damage percentage cannot exceed major damage percentage.")
+        except (ValueError, InvalidOperation, TypeError) as exc:
+            flash(f"Please check the values: {exc}", "danger")
+            return redirect(url_for('admin.settings'))
+
+        SystemSetting.set_value(
+            'deposit_flat_amount', f"{deposit_flat:.2f}", current_user.id
+        )
+        SystemSetting.set_value(
+            'late_fee_per_day', f"{late_fee:.2f}", current_user.id
+        )
+        SystemSetting.set_value('damage_fee_minor_pct', minor_pct, current_user.id)
+        SystemSetting.set_value('damage_fee_major_pct', major_pct, current_user.id)
+        SystemSetting.set_value(
+            'default_reorder_level', default_reorder, current_user.id
+        )
+        db.session.commit()
+        flash("Business rules updated. New transactions will use these values.", "success")
+        return redirect(url_for('admin.settings'))
+
+    return render_template(
+        "admin/settings.html",
+        settings=SystemSetting.all_effective(),
+    )
+
+
+@admin_bp.route('/void-requests')
+@login_required
+def void_requests():
+    """Admin approval queue for staff void/cancel requests (Table 15)."""
+    if (current_user.role or '').strip() != 'Administrator':
+        abort(403)
+    pending = (
+        VoidRequest.query.filter_by(status='Pending')
+        .order_by(VoidRequest.requested_at.asc())
+        .all()
+    )
+    history = (
+        VoidRequest.query.filter(VoidRequest.status != 'Pending')
+        .order_by(VoidRequest.reviewed_at.desc(), VoidRequest.requested_at.desc())
+        .limit(25)
+        .all()
+    )
+    return render_template(
+        'admin/void_requests.html', pending=pending, history=history
+    )
+
+
+@admin_bp.route('/void-requests/<int:request_id>/approve', methods=['POST'])
+@login_required
+def approve_void_request(request_id):
+    if (current_user.role or '').strip() != 'Administrator':
+        abort(403)
+    req = VoidRequest.query.get_or_404(request_id)
+    if req.status != 'Pending':
+        flash("This request has already been reviewed.", "info")
+        return redirect(url_for('admin.void_requests'))
+
+    if req.transaction.status == 'Cancelled':
+        req.status = 'Approved'
+        req.reviewed_by_id = current_user.id
+        req.reviewed_at = datetime.utcnow()
+        req.review_note = (request.form.get('review_note', '').strip()[:255]
+                           or "Transaction was already cancelled.")
+        db.session.commit()
+        flash("Transaction was already cancelled; request closed without another stock adjustment.", "info")
+        return redirect(url_for('admin.void_requests'))
+
+    _apply_transaction_cancellation(req.transaction, req.reason, current_user)
+    req.status = 'Approved'
+    req.reviewed_by_id = current_user.id
+    req.reviewed_at = datetime.utcnow()
+    req.review_note = request.form.get('review_note', '').strip()[:255]
+    db.session.commit()
+    flash(f"Void approved for {req.transaction.reference_no}; inventory restored.", "success")
+    return redirect(url_for('admin.void_requests'))
+
+
+@admin_bp.route('/void-requests/<int:request_id>/reject', methods=['POST'])
+@login_required
+def reject_void_request(request_id):
+    if (current_user.role or '').strip() != 'Administrator':
+        abort(403)
+    req = VoidRequest.query.get_or_404(request_id)
+    if req.status != 'Pending':
+        flash("This request has already been reviewed.", "info")
+        return redirect(url_for('admin.void_requests'))
+
+    req.status = 'Rejected'
+    req.reviewed_by_id = current_user.id
+    req.reviewed_at = datetime.utcnow()
+    req.review_note = request.form.get('review_note', '').strip()[:255]
+    db.session.commit()
+    flash(f"Void request for {req.transaction.reference_no} rejected.", "info")
+    return redirect(url_for('admin.void_requests'))
+
+
 @admin_bp.route('/staff-management', methods=['GET', 'POST'])
 @login_required
 def staff_management():
@@ -4990,7 +5796,8 @@ def staff_management():
         staff_members=staff_members,
         total_staff_count=total_staff_count,
         admin_count=admin_count,
-        active_staff_count=active_staff_count
+        active_staff_count=active_staff_count,
+        positions=list(ROLE_PRESETS.keys())
     )
 
 
@@ -5007,8 +5814,11 @@ def create_system_user():
         "first": request.form.get("first_name", "").strip().title(),
         "last": request.form.get("last_name", "").strip().title(),
         "pwd": request.form.get("password", ""),
-        "role": request.form.get("role")
     }
+    position = (request.form.get("staff_position") or "Counter Staff").strip()
+    if position not in ROLE_PRESETS:
+        position = "Counter Staff"
+    role = ROLE_PRESETS[position]["role"]
 
     if not all(data.values()):
         flash("All fields are mandatory.", "danger")
@@ -5032,7 +5842,8 @@ def create_system_user():
             password_hash=passhasher.hash(data['pwd']),
             first_name=data['first'],
             last_name=data['last'],
-            role=data['role'],
+            role=role,
+            staff_position=position,
             is_active=True,
             is_verified=True
         )
@@ -5041,7 +5852,12 @@ def create_system_user():
         db.session.flush() 
 
 
-        new_permissions = Permission(user_id=user_record.id)
+        preset = {
+            key: value
+            for key, value in ROLE_PRESETS[position].items()
+            if key != "role"
+        }
+        new_permissions = Permission(user_id=user_record.id, **preset)
         db.session.add(new_permissions)
 
         db.session.commit()
@@ -5066,6 +5882,11 @@ def update_user_access():
     user = User.query.get_or_404(user_id)
 
     user.role = request.form.get("role")
+    position = request.form.get("staff_position")
+    if position in ROLE_PRESETS:
+        user.staff_position = position
+        if position == "Owner/Admin":
+            user.role = "Administrator"
 
     perms = Permission.query.filter_by(user_id=user_id).first()
     if not perms:
@@ -5074,11 +5895,15 @@ def update_user_access():
     
 
     perms.can_manage_customers = 'can_manage_customers' in request.form
+    perms.can_verify_customers = 'can_verify_customers' in request.form
     perms.can_manage_products = 'can_manage_products' in request.form
+    perms.can_update_stock = 'can_update_stock' in request.form
     perms.can_process_transactions = 'can_process_transactions' in request.form
     perms.can_confirm_payments = 'can_confirm_payments' in request.form
+    perms.can_export_transactions = 'can_export_transactions' in request.form
     perms.can_manage_expenses = 'can_manage_expenses' in request.form
     perms.can_view_reports = 'can_view_reports' in request.form
+    perms.can_view_logs = 'can_view_logs' in request.form
     perms.can_view_active_rentals = 'can_view_active_rentals' in request.form
     
     try:

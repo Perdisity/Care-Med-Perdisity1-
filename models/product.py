@@ -13,6 +13,10 @@ class Product(db.Model):
     size = db.Column(db.String(50), nullable=True)
     description = db.Column(db.Text, nullable=True) 
     stock = db.Column(db.Integer, default=0)
+    # Per-product reorder level (FR07 / RULE-05). Falls back to the system default.
+    reorder_level = db.Column(db.Integer, nullable=False, default=5)
+    # Units returned damaged and therefore not available for rent (RULE-10).
+    damaged_stock = db.Column(db.Integer, nullable=False, default=0)
     
     transaction_type = db.Column(db.String(20), nullable=True, default="Sale")
     cost_price = db.Column(db.Numeric(10, 2), nullable=True, default=0.00)
@@ -46,6 +50,7 @@ class TankStatus(db.Model):
     rented_out = db.Column(db.Integer, default=0) 
     full_in_stock = db.Column(db.Integer, default=0) 
     empty_in_stock = db.Column(db.Integer, default=0) 
+    damaged_in_stock = db.Column(db.Integer, nullable=False, default=0)
 
     product = db.relationship("Product", back_populates="tank_status")
 
@@ -156,6 +161,8 @@ class Transaction(db.Model):
     payment_proof = db.relationship("PaymentProof", backref="transaction", uselist=False, cascade="all, delete-orphan")
     
     deposit_amount = db.Column(db.Numeric(10, 2), nullable=False, default=0.00)
+    distance_km = db.Column(db.Numeric(6, 2), nullable=True)
+    deposit_rule = db.Column(db.String(50), nullable=True)
     
     fulfillment_type = db.Column(db.String(20), default="Walk-in") 
     delivery_status = db.Column(db.String(20), default="N/A") 
@@ -458,6 +465,9 @@ class Rental(db.Model):
     status = db.Column(db.String(50), default="Active", index=True)
     is_open_duration = db.Column(db.Boolean, default=False, nullable=False)
     return_condition_notes = db.Column(db.Text)
+    # RULE-10: condition recorded at return and the fee assessed against the deposit.
+    return_condition = db.Column(db.String(30), nullable=True)
+    damage_fee = db.Column(db.Numeric(10, 2), default=0.00)
     
     is_deposit_refunded = db.Column(db.Boolean, default=False)
     delivery_fee = db.Column(db.Numeric(10, 2), default=0.00)
@@ -602,8 +612,12 @@ class InventoryLog(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     product_id = db.Column(db.Integer, db.ForeignKey("product.id", ondelete="SET NULL"), nullable=True)
+    transaction_id = db.Column(db.Integer, db.ForeignKey("transaction.id", ondelete="SET NULL"), nullable=True, index=True)
+    reference_no = db.Column(db.String(40), nullable=True, index=True)
+    reason_code = db.Column(db.String(30), nullable=True, index=True)
     action = db.Column(db.String(100), nullable=False)
     quantity = db.Column(db.Integer, nullable=True)
+    balance_after = db.Column(db.Integer, nullable=True)
     note = db.Column(db.String(255), nullable=True)
     user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     user_name = db.Column(db.String(100), nullable=True)
@@ -611,6 +625,7 @@ class InventoryLog(db.Model):
 
     product = db.relationship("Product", back_populates="inventory_logs")
     user = db.relationship("User", backref=db.backref("inventory_logs", lazy="dynamic"))
+    transaction = db.relationship("Transaction", backref=db.backref("inventory_logs", lazy="dynamic"))
     
     
 class Expense(db.Model):
@@ -620,6 +635,8 @@ class Expense(db.Model):
     category = db.Column(db.String(50), nullable=False)
     expense_title = db.Column(db.String(120), nullable=True) 
     amount = db.Column(db.Numeric(10, 2), nullable=False)
+    # FR06: units converted from empty to full in this supplier batch.
+    refill_quantity = db.Column(db.Integer, nullable=True)
     description = db.Column(db.String(255))
     attachment_path = db.Column(db.String(255)) 
     

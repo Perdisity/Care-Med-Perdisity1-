@@ -103,7 +103,10 @@
                     <tr>
                         <td style="font-weight: 600;">{{ user.full_name }}</td>
                         <td>{{ user.email }}</td>
-                        <td><span class="pill-{{ user.role }}">{{ user.role|title }}</span></td>
+                        <td>
+                            <span class="pill-{{ user.role }}">{{ (user.staff_position or user.role)|title }}</span>
+                            <div style="font-size:0.7rem; color:#94a3b8;">{{ user.role|title }} account</div>
+                        </td>
                         <td>
                             <span class="status-indicator {{ 'online' if user.is_active else 'offline' }}"></span>
                             {{ 'Active' if user.is_active else 'Suspended' }}
@@ -117,12 +120,17 @@
                                         data-first-name="{{ user.first_name }}"
                                         data-last-name="{{ user.last_name }}"
                                         data-role="{{ user.role }}"
+                                        data-position="{{ user.staff_position or '' }}"
                                         data-can-manage-customers="{{ 'true' if (user.permissions and user.permissions.can_manage_customers) else 'false' }}"
+                                        data-can-verify-customers="{{ 'true' if (user.permissions and user.permissions.can_verify_customers) else 'false' }}"
                                         data-can-manage-products="{{ 'true' if (user.permissions and user.permissions.can_manage_products) else 'false' }}"
+                                        data-can-update-stock="{{ 'true' if (user.permissions and user.permissions.can_update_stock) else 'false' }}"
                                         data-can-process-transactions="{{ 'true' if (user.permissions and user.permissions.can_process_transactions) else 'false' }}"
                                         data-can-confirm-payments="{{ 'true' if (user.permissions and user.permissions.can_confirm_payments) else 'false' }}"
+                                        data-can-export-transactions="{{ 'true' if (user.permissions and user.permissions.can_export_transactions) else 'false' }}"
                                         data-can-manage-expenses="{{ 'true' if (user.permissions and user.permissions.can_manage_expenses) else 'false' }}"
                                         data-can-view-reports="{{ 'true' if (user.permissions and user.permissions.can_view_reports) else 'false' }}"
+                                        data-can-view-logs="{{ 'true' if (user.permissions and user.permissions.can_view_logs) else 'false' }}"
                                         data-can-view-active-rentals="{{ 'true' if (user.permissions and user.permissions.can_view_active_rentals) else 'false' }}">
                                     <span class="material-symbols-rounded">edit</span>
                                 </button>
@@ -161,10 +169,11 @@
             <input type="email" name="email" placeholder="Email Address" required>
             <input type="password" name="password" placeholder="Initial Password" required>
             
-            <label style="display:block; margin: 10px 0 5px; font-weight: 600;">Account Role</label>
-            <select name="role" required>
-                <option value="Staff">Staff (Limited Access)</option>
-                <option value="Administrator">Administrator (Full Access)</option>
+            <label style="display:block; margin: 10px 0 5px; font-weight: 600;">Staff Position (sets default permissions)</label>
+            <select name="staff_position" required>
+                {% for position in positions %}
+                <option value="{{ position }}" {% if position == 'Counter Staff' %}selected{% endif %}>{{ position }}</option>
+                {% endfor %}
             </select>
             
             <div id="create-user-error"
@@ -188,14 +197,21 @@
             <p id="edit-user-name" style="color: #64748b; margin-bottom: 20px;"></p>
             
             <label>Update Role</label>
-            <select name="role" id="edit-user-role" style="width:100%; margin-bottom: 20px;">
+            <select name="role" id="edit-user-role" style="width:100%; margin-bottom: 12px;">
                 <option value="Staff">Staff</option>
                 <option value="Administrator">Administrator</option>
             </select>
 
+            <label>Staff Position</label>
+            <select name="staff_position" id="edit-user-position" style="width:100%; margin-bottom: 20px;">
+                {% for position in positions %}
+                <option value="{{ position }}">{{ position }}</option>
+                {% endfor %}
+            </select>
+
             <label style="font-weight: 600; display: block; margin-bottom: 15px;">Access Permissions</label>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; background: #f8fafc; padding: 15px; border-radius: 8px;">
-                {% for perm in ['can_manage_customers', 'can_manage_products', 'can_process_transactions', 'can_confirm_payments', 'can_manage_expenses', 'can_view_reports', 'can_view_active_rentals'] %}
+                {% for perm in ['can_manage_customers', 'can_verify_customers', 'can_manage_products', 'can_update_stock', 'can_process_transactions', 'can_confirm_payments', 'can_export_transactions', 'can_manage_expenses', 'can_view_reports', 'can_view_logs', 'can_view_active_rentals'] %}
                 <div style="display: flex; justify-content: space-between; align-items: center;">
                     <span style="font-size: 0.85rem; text-transform: capitalize;">{{ perm.replace('can_', '').replace('_', ' ') }}</span>
                     <label class="switch">

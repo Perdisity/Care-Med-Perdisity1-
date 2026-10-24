@@ -506,6 +506,7 @@
                                 <th style="padding: 10px;">Equipment</th>
                                 <th style="padding: 10px; text-align: center;">Qty to Return</th>
                                 <th style="padding: 10px; text-align: center;">Tank Status</th>
+                                <th style="padding: 10px; text-align: center;">Condition</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -518,11 +519,21 @@
                                 <td style="padding: 10px; vertical-align: middle;">
                                     <div>
                                         {{ item.product.name }}
-                                        {% if item.serial_number %}
-                                            <span class="text-muted font-monospace" style="font-size: 0.85rem;">(SN: {{ item.serial_number }})</span>
+                                        {% if item.tanks %}
+                                            <span class="text-muted font-monospace" style="font-size: 0.85rem;">(SN: {{ item.tanks | map(attribute='serial_number') | join(', ') }})</span>
                                         {% endif %}
                                     </div>
                                     <small class="text-muted">Remaining: {{ item.remaining_to_return }}</small>
+                                    {% if item.late_fees_incurred and item.late_fees_incurred > 0 %}
+                                        <small style="display:block; color:#b45309; font-size:0.72rem;">
+                                            Late fees: ₱{{ "{:,.2f}".format(item.late_fees_incurred) }}
+                                        </small>
+                                    {% endif %}
+                                    {% if item.damage_fee and item.damage_fee > 0 %}
+                                        <small style="display:block; color:#b91c1c; font-size:0.72rem;">
+                                            Damage fee: ₱{{ "{:,.2f}".format(item.damage_fee) }}
+                                        </small>
+                                    {% endif %}
                                 </td>
                                 <td style="padding: 10px; text-align: center; vertical-align: middle;">
                                     <input type="number" 
@@ -543,6 +554,14 @@
                                         <span class="text-muted" style="font-size: 0.85em;">N/A</span>
                                     {% endif %}
                                 </td>
+                                <td style="padding: 10px; text-align: center; vertical-align: middle;">
+                                    <select name="condition_{{ item.id }}" class="form-control" style="padding: 5px; width: 130px; margin: 0 auto;">
+                                        <option value="Good">Good</option>
+                                        <option value="Minor Damage">Minor Damage</option>
+                                        <option value="Major Damage">Major Damage</option>
+                                        <option value="Total Loss">Total Loss</option>
+                                    </select>
+                                </td>
                             </tr>
                             {% endif %}
                             {% endfor %}
@@ -557,6 +576,10 @@
                         <div style="flex: 1;">
                             <label style="display: block; margin-bottom: 5px;">Late Fees (₱)</label>
                             <input type="number" name="late_fees" class="form-control" value="0.00" step="0.01" style="width: 100%; padding: 8px;">
+                            <small class="text-muted" style="display:block; margin-top:4px; font-size:0.7rem;">
+                                Auto-computed: ₱{{ '%.2f'|format(biz.late_fee_per_day) }}/day per unit overdue.
+                                Only an Administrator may override.
+                            </small>
                         </div>
                     </div>
 
@@ -571,7 +594,7 @@
                         <div>
                             <label style="display: block; margin-bottom: 5px; font-size: 0.9rem;">Deposit Refund Amount (₱)</label>
                             <input type="number" name="deposit_refund_amount" class="form-control" value="0.00" step="0.01" style="width: 200px; padding: 6px;">
-                            <small class="text-muted" style="display: block; margin-top: 4px;">Check this box and specify the amount if returning held security/equipment deposits to the customer upon this return.</small>
+                            <small class="text-muted" style="display: block; margin-top: 4px;">Check this box and specify the amount if returning held security/equipment deposits to the customer upon this return. Damage fees (minor {{ biz.damage_fee_minor_pct }}%, major {{ biz.damage_fee_major_pct }}% of deposit; total loss at cash price) are deducted automatically.</small>
                         </div>
                     </div>
 

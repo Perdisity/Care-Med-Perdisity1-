@@ -978,6 +978,21 @@ function toggleRentDelivery(isDelivery) {
         deliveryFields.style.display = isDelivery ? 'grid' : 'none';
         const addrInput = deliveryFields.querySelector('input[name="delivery_address"]');
         if (addrInput) addrInput.required = isDelivery;
+
+        const distanceInput = document.getElementById('rent-distance-km');
+        if (distanceInput) {
+            distanceInput.required = isDelivery;
+            if (!isDelivery) distanceInput.value = '';
+        }
+    }
+
+    // FR02 / RULE-03: apply the flat, owner-set deposit for delivery rentals.
+    const depositInput = document.getElementById('rent-customer-deposit');
+    if (depositInput) {
+        depositInput.readOnly = isDelivery;
+        depositInput.value = isDelivery
+            ? parseFloat(depositInput.dataset.flatDeposit || '0').toFixed(2)
+            : '0.00';
     }
     
     // Reset delivery fee dynamically if changing fulfillment back to Walk-In
@@ -2388,6 +2403,9 @@ document.addEventListener('DOMContentLoaded', function() {
         })
         .then(data => {
             if (data.success) {
+                if (data.pending) {
+                    alert(data.message || 'Void request submitted for Administrator approval.');
+                }
                 window.location.reload();
             } else {
                 alert(data.message || 'Failed to cancel the transaction.');

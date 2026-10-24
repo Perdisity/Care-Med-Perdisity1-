@@ -110,13 +110,25 @@
                             {{ product.tank_status.full_in_stock or 0 }} Units
                             <small style="display:block; color:#94a3b8; font-size:0.72rem;">
                                 {{ product.tank_status.rented_out or 0 }} rented out
+                                {% if product.tank_status.damaged_in_stock %}
+                                    · <span style="color:#b91c1c;">{{ product.tank_status.damaged_in_stock }} damaged</span>
+                                {% endif %}
                             </small>
                         {% else %}
                             {{ product.stock }} Units
+                            {% if product.damaged_stock %}
+                                <small style="display:block; color:#b91c1c; font-size:0.72rem;">
+                                    {{ product.damaged_stock }} damaged
+                                </small>
+                            {% endif %}
                         {% endif %}
+                        <small style="display:block; color:#94a3b8; font-size:0.68rem;">
+                            Reorder at {{ product.reorder_level or 0 }}
+                        </small>
                     </td>
                     <td>
-                        {% if product.stock > 0 %}
+                        {% set display_stock = product.tank_status.full_in_stock if product.is_refillable and product.tank_status else product.stock %}
+                        {% if display_stock > 0 %}
                             <span class="status-pill status-ready">Available</span>
                         {% else %}
                             <span class="status-pill" style="background:#fee2e2; color:#991b1b;">Out of Stock</span>
@@ -180,6 +192,7 @@
                                         data-cost-price="{{ product.cost_price }}"
                                         data-stock="{{ product.stock }}"
                                         data-condition="{{ product.condition }}"
+                                        data-reorder="{{ product.reorder_level }}"
                                         data-offer="{{ product.transaction_type }}"
                                         data-rent="{{ product.rent_price }}"
                                         data-period="{{ product.rent_period }}"
@@ -317,7 +330,7 @@
                     </div>
                     
                     {# UPDATED GRID TO 4 COLUMNS TO ACCOMMODATE SIZE #}
-                    <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:15px;">
+                    <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr 1fr; gap:15px;">
                         <div class="form-field">
                             <label class="clinical-label">Unit Cost</label>
                             <input type="number" name="cost_price" id="edit-cost_price" class="clinical-input" placeholder="0.00" step="0.01" min="0" required>
@@ -325,6 +338,10 @@
                         <div class="form-field">
                             <label class="clinical-label">Initial Stock</label>
                             <input type="number" name="stock" class="clinical-input" placeholder="0" min="0" required>
+                        </div>
+                        <div class="form-field">
+                            <label class="clinical-label">Reorder Level</label>
+                            <input type="number" name="reorder_level" class="clinical-input" placeholder="{{ biz.default_reorder_level }}" min="0" value="{{ biz.default_reorder_level }}" title="Trigger a low-stock alert when stock reaches this number">
                         </div>
                         <div class="form-field">
                             <label class="clinical-label">Size</label>
@@ -451,7 +468,7 @@
                         </div>
                     </div>
 
-                    <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:15px;">
+                    <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr 1fr; gap:15px;">
                         <div class="form-field">
                             <label class="clinical-label">Size</label>
                             <input type="text" name="size" id="edit-size" class="clinical-input" placeholder="e.g. Large">
@@ -463,6 +480,10 @@
                                 <option value="Used">Used</option>
                                 <option value="Brand New">Brand New</option>
                             </select>
+                        </div>
+                        <div class="form-field">
+                            <label class="clinical-label">Reorder Level</label>
+                            <input type="number" name="reorder_level" id="edit-reorder" class="clinical-input" placeholder="5" min="0" title="Trigger a low-stock alert when stock reaches this number">
                         </div>
                         <div class="form-field" style="grid-column: span 2;">
                             <label class="clinical-label" style="color:#94a3b8;">Current Unit Cost</label>
