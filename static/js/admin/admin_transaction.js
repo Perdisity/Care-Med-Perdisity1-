@@ -968,6 +968,65 @@ function updateRentRefVisibility() {
 }
 
 /**
+ * FR02 / RULE-03: preview the distance-based delivery deposit.
+ * The server recomputes the authoritative amount on submission.
+ */
+function updateRentDepositFromDistance() {
+    const depositInput = document.getElementById('rent-customer-deposit');
+    const distanceInput = document.getElementById('rent-distance-km');
+    const hint = document.getElementById('rent-deposit-hint');
+    if (!depositInput) return;
+
+    const fallback = parseFloat(depositInput.dataset.flatDeposit || '0') || 0;
+    let tiers = [];
+    try {
+        tiers = JSON.parse(depositInput.dataset.depositTiers || '[]');
+    } catch (err) {
+        tiers = [];
+    }
+
+    const km = distanceInput ? parseFloat(distanceInput.value) : NaN;
+    const validDistance = !isNaN(km) && km > 0;
+    let amount = 0;
+    let label = 'Enter delivery distance';
+
+    if (validDistance) {
+        amount = fallback;
+        label = 'Flat delivery deposit';
+
+        const numericTiers = tiers
+            .filter(tier => tier.max_km !== null && tier.max_km !== undefined)
+            .sort((a, b) => Number(a.max_km) - Number(b.max_km));
+
+        let matched = false;
+        for (const tier of numericTiers) {
+            if (km <= Number(tier.max_km)) {
+                amount = Number(tier.amount);
+                label = tier.label;
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) {
+            const fallbackTier = tiers.find(
+                tier => tier.max_km === null || tier.max_km === undefined
+            );
+            if (fallbackTier) {
+                amount = Number(fallbackTier.amount);
+                label = fallbackTier.label;
+            }
+        }
+    }
+
+    depositInput.value = amount.toFixed(2);
+    if (hint) {
+        hint.textContent = validDistance
+            ? `Deposit: ₱${amount.toFixed(2)} (${label})`
+            : 'Enter the delivery distance to compute the deposit.';
+    }
+}
+
+/**
  * Handles toggling delivery fields and fees for the Rent Modal
  */
 function toggleRentDelivery(isDelivery) {
@@ -986,13 +1045,19 @@ function toggleRentDelivery(isDelivery) {
         }
     }
 
-    // FR02 / RULE-03: apply the flat, owner-set deposit for delivery rentals.
+    // FR02 / RULE-03: delivery deposit is computed from the distance tiers.
     const depositInput = document.getElementById('rent-customer-deposit');
+    const depositHint = document.getElementById('rent-deposit-hint');
     if (depositInput) {
         depositInput.readOnly = isDelivery;
-        depositInput.value = isDelivery
-            ? parseFloat(depositInput.dataset.flatDeposit || '0').toFixed(2)
-            : '0.00';
+        if (isDelivery) {
+            updateRentDepositFromDistance();
+        } else {
+            depositInput.value = '0.00';
+            if (depositHint) {
+                depositHint.textContent = 'Walk-in rentals default to zero; staff may adjust.';
+            }
+        }
     }
     
     // Reset delivery fee dynamically if changing fulfillment back to Walk-In
@@ -1596,6 +1661,9 @@ if (rentForm) {
     });
 
     rentForm.addEventListener('input', (e) => {
+        if (e.target.id === 'rent-distance-km') {
+            updateRentDepositFromDistance();
+        }
         calculateRentalTotals();
     });
 }

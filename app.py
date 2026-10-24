@@ -17,7 +17,7 @@ from flask_login import current_user, logout_user
 from datetime import datetime, timezone, timedelta
 from flask import session, g
 from werkzeug.middleware.proxy_fix import ProxyFix
-from models.settings import SystemSetting
+from models.settings import SystemSetting, parse_deposit_tiers
 
 
 app = Flask(__name__)
@@ -235,7 +235,19 @@ def inject_business_rules():
             key: row.as_python()
             for key, row in SystemSetting.all_effective().items()
         }
-    return {"biz": g.biz}
+    try:
+        parsed_tiers = parse_deposit_tiers(g.biz.get("deposit_distance_tiers"))
+    except ValueError:
+        parsed_tiers = []
+    deposit_tiers_json = [
+        {
+            "max_km": float(tier["max_km"]) if tier["max_km"] is not None else None,
+            "amount": float(tier["amount"]),
+            "label": tier["label"],
+        }
+        for tier in parsed_tiers
+    ]
+    return {"biz": g.biz, "deposit_tiers_json": deposit_tiers_json}
 
     
 @app.route('/')

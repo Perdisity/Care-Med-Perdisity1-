@@ -8,7 +8,12 @@ from functools import wraps
 from models.product import Product, InventoryLog, Transaction, Purchase, Payment, Rental, RentalInvoice, Expense, PaymentProof, TankStatus, RentalTank, RentalTankLog, CustomerDeposit
 from models.customer import Customer
 from models.users import User, SecurityLog, BlockedIP, Permission
-from models.settings import SystemSetting
+from models.settings import (
+    SystemSetting,
+    format_deposit_tiers,
+    parse_deposit_tiers,
+    resolve_delivery_deposit,
+)
 from models.operations import StockAdjustment, VoidRequest
 from flask_mail import Message
 from flask import current_app
@@ -42,6 +47,17 @@ admin_bp = Blueprint('admin', __name__, url_prefix='/admin')
 # Chapter III stakeholder roles → default permission bundles. Administrators
 # always bypass permission checks; these presets make Staff accounts match the
 # duties described in the thesis, while the edit modal still allows overrides.
+DAMAGE_CONDITIONS = ('Minor Damage', 'Major Damage', 'Total Loss')
+DAMAGE_REASON_CODES = (
+    'Cracked',
+    'Broken',
+    'Leak',
+    'Missing Parts',
+    'Electrical Fault',
+    'Lost',
+    'Other',
+)
+
 ROLE_PRESETS = {
     'Owner/Admin': {
         'role': 'Administrator',
@@ -1969,9 +1985,8 @@ def process_rental():
             flash("Customer deposit cannot be negative.", "danger")
             return redirect(request.referrer or url_for('admin.transactions'))
 
-        # FR02 / RULE-03: delivery rentals carry a flat, owner-configurable deposit.
-        # The distance is still captured because it drives the delivery fee and is
-        # part of the transaction record required by the thesis.
+        # FR02 / RULE-03: delivery deposits are derived from the owner-configured
+        # distance tiers. The flat amount remains a fallback for legacy/blank tiers.
         distance_km = None
         deposit_rule = None
         if fulfillment_type == 'Delivery':
@@ -1987,10 +2002,24 @@ def process_rental():
                 flash("Delivery distance must be greater than zero.", "danger")
                 return redirect(request.referrer or url_for('admin.transactions'))
 
-            customer_deposit = Decimal(
-                str(SystemSetting.value_of('deposit_flat_amount') or '0')
-            ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            deposit_rule = "Flat delivery deposit"
+            try:
+                deposit_tiers = parse_deposit_tiers(
+                    SystemSetting.value_of('deposit_distance_tiers')
+                )
+            except ValueError:
+                deposit_tiers = []
+                current_app.logger.warning(
+                    "Invalid deposit_distance_tiers setting; using flat fallback."
+                )
+
+            customer_deposit, deposit_rule = resolve_delivery_deposit(
+                distance_km,
+                tiers=deposit_tiers,
+                fallback_amount=SystemSetting.value_of('deposit_flat_amount'),
+            )
+            customer_deposit = customer_deposit.quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
 
         try:
             raw_voucher = request.form.get('voucher_amount') or request.form.get('voucher') or request.form.get('discount') or '0'
@@ -3397,6 +3426,59 @@ def process_return(txn_id):
     except (InvalidOperation, ValueError, TypeError):
         deposit_refund_amount = Decimal('0.00')
 
+    # RULE-10 / TC-11: a damaged return needs a reason code and an
+    # Administrator's approval. Validate before mutating any rental/stock row.
+    damage_items = []
+    damage_reasons = {}
+    for item_id in returned_item_ids:
+        if not str(item_id).isdigit():
+            continue
+        rental = db.session.get(Rental, int(item_id))
+        if not rental or rental.transaction_id != txn.id:
+            continue
+
+        qty_input = request.form.get(f'qty_{item_id}', '0')
+        qty_to_return = int(qty_input) if qty_input.isdigit() else 0
+        qty_to_return = min(qty_to_return, rental.remaining_to_return)
+        if qty_to_return <= 0:
+            continue
+
+        condition = (request.form.get(f'condition_{item_id}') or 'Good').strip()
+        if condition not in ('Good',) + DAMAGE_CONDITIONS:
+            condition = 'Good'
+        if condition not in DAMAGE_CONDITIONS:
+            continue
+
+        reason = (request.form.get(f'damage_reason_{item_id}') or '').strip()
+        damage_items.append((rental, condition, str(item_id)))
+        if reason:
+            damage_reasons[str(item_id)] = reason
+
+    if damage_items and (current_user.role or '').strip() != 'Administrator':
+        flash(
+            "Damaged returns require Administrator approval. "
+            "Please ask an Administrator to process this return.",
+            "danger",
+        )
+        return redirect(url_for('admin.transaction_details', id=txn.id))
+
+    for rental, condition, item_id in damage_items:
+        reason = damage_reasons.get(item_id)
+        if reason not in DAMAGE_REASON_CODES:
+            flash(
+                f"Select a valid damage reason for {rental.product.name} "
+                f"({condition}).",
+                "danger",
+            )
+            return redirect(url_for('admin.transaction_details', id=txn.id))
+        if reason == 'Other' and not return_notes:
+            flash(
+                f"Describe the damage for {rental.product.name} in Return Notes "
+                "when the reason is 'Other'.",
+                "danger",
+            )
+            return redirect(url_for('admin.transaction_details', id=txn.id))
+
     try:
         user_display_name = f"{current_user.first_name} {current_user.last_name}"
         items_processed = 0
@@ -3443,8 +3525,13 @@ def process_return(txn_id):
                 
                 return_status = request.form.get(f'status_{item_id}', 'Full')
                 condition = (request.form.get(f'condition_{item_id}') or 'Good').strip()
-                if condition not in ('Good', 'Minor Damage', 'Major Damage', 'Total Loss'):
+                if condition not in ('Good',) + DAMAGE_CONDITIONS:
                     condition = 'Good'
+                damage_reason = (
+                    damage_reasons.get(str(item_id))
+                    if condition in DAMAGE_CONDITIONS
+                    else None
+                )
 
                 # RULE-10: assess the damage fee against the held deposit.
                 item_damage_fee = Decimal('0.00')
@@ -3471,6 +3558,13 @@ def process_return(txn_id):
 
                 rental.return_condition = condition
                 rental.damage_fee = (rental.damage_fee or 0) + item_damage_fee
+                if condition in DAMAGE_CONDITIONS:
+                    rental.damage_reason = damage_reason
+                    rental.damage_approved_by_id = current_user.id
+                    rental.damage_approved_at = datetime.utcnow()
+                    rental.return_condition_notes = (
+                        return_notes or rental.return_condition_notes
+                    )
                 log_balance = rental.product.stock or 0
 
                 if condition == 'Total Loss':
@@ -3552,12 +3646,26 @@ def process_return(txn_id):
                     quantity=log_qty,
                     balance_after=log_balance,
                     note=(
-                        f"Txn {txn.reference_no} Return. Condition: {condition}. "
+                        f"Txn {txn.reference_no} Return. Condition: "
+                        f"{condition}{f' ({damage_reason})' if damage_reason else ''}. "
                         f"Tank status: {return_status}. {return_notes}"
                     ),
                     user_id=current_user.id,
                     user_name=user_display_name
                 ))
+                if condition in DAMAGE_CONDITIONS:
+                    db.session.add(SecurityLog(
+                        event_type="Damage Approved",
+                        description=(
+                            f"Txn {txn.reference_no} | {rental.product.name} | "
+                            f"{condition} | Reason: {damage_reason} | "
+                            f"Fee: ₱{item_damage_fee:,.2f} | "
+                            f"Approved by Administrator {current_user.email}."
+                        ),
+                        user_id=current_user.id,
+                        user_email=current_user.email,
+                        severity="High" if condition == 'Total Loss' else "Medium",
+                    ))
                 items_processed += 1
 
         # Percentage-based damage is capped at the deposit actually held.
@@ -5050,18 +5158,21 @@ def security_dashboard():
         flash("Access restricted to Administrators only.", "danger")
         return redirect(url_for('admin.dashboard'))
 
-    logs = SecurityLog.query.order_by(SecurityLog.created_at.desc()).limit(500).all()
+    show_archived = request.args.get('archived') == '1'
+    log_scope = SecurityLog.query.filter(SecurityLog.is_archived.is_(show_archived))
+    logs = log_scope.order_by(SecurityLog.created_at.desc()).limit(500).all()
     blocked = BlockedIP.query.filter_by(is_active=True).order_by(BlockedIP.blocked_at.desc()).all()
  
-    total_logs        = SecurityLog.query.count()
-    suspicious_count  = SecurityLog.query.filter_by(is_suspicious=True).count()
+    total_logs        = log_scope.count()
+    suspicious_count  = log_scope.filter_by(is_suspicious=True).count()
     blocked_count     = BlockedIP.query.filter_by(is_active=True).count()
-    rate_limit_count  = SecurityLog.query.filter_by(event_type="Rate Limit Violation").count()
+    rate_limit_count  = log_scope.filter_by(event_type="Rate Limit Violation").count()
  
-    failed_count      = SecurityLog.query.filter(SecurityLog.event_type.ilike("%failed%")).count()
-    locked_count      = SecurityLog.query.filter(SecurityLog.event_type.ilike("%lock%")).count()
-    blocked_ip_count  = SecurityLog.query.filter(SecurityLog.event_type.ilike("%block%")).count()
-    bot_count         = SecurityLog.query.filter_by(event_type="Bot Detected").count()
+    failed_count      = log_scope.filter(SecurityLog.event_type.ilike("%failed%")).count()
+    locked_count      = log_scope.filter(SecurityLog.event_type.ilike("%lock%")).count()
+    blocked_ip_count  = log_scope.filter(SecurityLog.event_type.ilike("%block%")).count()
+    bot_count         = log_scope.filter_by(event_type="Bot Detected").count()
+    archived_count    = SecurityLog.query.filter_by(is_archived=True).count()
  
     # ── Admin Activity tab ────────────────────────────────────────────────
     # All event types that belong to admin activity monitoring
@@ -5083,48 +5194,54 @@ def security_dashboard():
     ]
  
     admin_logs = SecurityLog.query.filter(
-        SecurityLog.event_type.in_(admin_event_types)
+        SecurityLog.is_archived == False,
+        SecurityLog.event_type.in_(admin_event_types),
     ).order_by(SecurityLog.created_at.desc()).limit(200).all()
 
     admin_activity_count = SecurityLog.query.filter(
-        SecurityLog.event_type.in_(admin_event_types)
+        SecurityLog.is_archived == False,
+        SecurityLog.event_type.in_(admin_event_types),
     ).count()
 
     admin_login_count = SecurityLog.query.filter(
-        SecurityLog.event_type.in_(['Admin Login', 'Admin Login — New Device'])
+        SecurityLog.is_archived == False,
+        SecurityLog.event_type.in_(['Admin Login', 'Admin Login — New Device']),
     ).count()
 
     admin_logout_count = SecurityLog.query.filter_by(
-        event_type='Admin Logout'
+        event_type='Admin Logout', is_archived=False
     ).count()
 
     admin_expired_count = SecurityLog.query.filter_by(
-        event_type='Admin Session Expired'
+        event_type='Admin Session Expired', is_archived=False
     ).count()
 
     admin_failed_count = SecurityLog.query.filter_by(
-        event_type='Admin Failed Login'
+        event_type='Admin Failed Login', is_archived=False
     ).count()
 
     # ── Staff Activity ─────────────────────────────────────────────────────
     staff_logs = SecurityLog.query.filter(
-        SecurityLog.event_type.in_(staff_event_types)
+        SecurityLog.is_archived == False,
+        SecurityLog.event_type.in_(staff_event_types),
     ).order_by(SecurityLog.created_at.desc()).limit(200).all()
 
     staff_activity_count = SecurityLog.query.filter(
-        SecurityLog.event_type.in_(staff_event_types)
+        SecurityLog.is_archived == False,
+        SecurityLog.event_type.in_(staff_event_types),
     ).count()
 
     staff_login_count = SecurityLog.query.filter(
-        SecurityLog.event_type.in_(['Staff Login', 'Staff Login — New Device'])
+        SecurityLog.is_archived == False,
+        SecurityLog.event_type.in_(['Staff Login', 'Staff Login — New Device']),
     ).count()
 
     staff_logout_count = SecurityLog.query.filter_by(
-        event_type='Staff Logout'
+        event_type='Staff Logout', is_archived=False
     ).count()
 
     staff_action_count = SecurityLog.query.filter_by(
-        event_type='Staff Action'
+        event_type='Staff Action', is_archived=False
     ).count()
 
     # ── All staff actions from InventoryLog (what they did) ───────────────
@@ -5162,6 +5279,8 @@ def security_dashboard():
         staff_action_count=staff_action_count,
         staff_activity_logs=staff_activity_logs,
         staff_members=staff_users,
+        show_archived=show_archived,
+        archived_count=archived_count,
     )
 
 
@@ -5255,33 +5374,110 @@ def unblock_ip(block_id):
     return redirect(url_for('admin.security_dashboard'))
  
  
-# ── Delete a single security log 
+# ── Archive a single security log (never hard-delete)
 @admin_bp.route('/security/delete-log/<int:log_id>', methods=['POST'])
 @login_required
 @admin_or_staff_required
 def delete_security_log(log_id):
+    if (current_user.role or '').strip() != 'Administrator':
+        return jsonify({
+            "success": False,
+            "message": "Administrator access required to archive audit logs."
+        }), 403
+
     log = SecurityLog.query.get_or_404(log_id)
+    if log.is_archived:
+        return jsonify({
+            "success": True,
+            "message": "This log is already archived."
+        })
+
+    data = request.get_json(silent=True) or {}
+    reason = (data.get('reason') or request.form.get('reason') or '').strip()
+    if not reason:
+        return jsonify({
+            "success": False,
+            "message": "A written reason is required before archiving an audit log."
+        }), 400
+
     try:
-        db.session.delete(log)
+        log.is_archived = True
+        log.archived_at = datetime.utcnow()
+        log.archived_by = current_user.email
+        log.archive_reason = reason[:255]
+        db.session.add(log)
+        db.session.add(SecurityLog(
+            event_type="Audit Log Archived",
+            description=(
+                f"Security log #{log.id} ({log.event_type or 'Unknown event'}) "
+                f"archived by Administrator. Reason: {reason[:255]}"
+            ),
+            user_id=current_user.id,
+            user_email=current_user.email,
+            severity="High",
+        ))
         db.session.commit()
-        return jsonify({"success": True})
+        return jsonify({
+            "success": True,
+            "message": "Log archived. The record remains permanently in the database."
+        })
     except Exception as e:
         db.session.rollback()
         return jsonify({"success": False, "message": str(e)}), 500
  
  
-# ── Clear ALL security logs 
+# ── Archive ALL active security logs (never hard-delete)
 @admin_bp.route('/security/clear-logs', methods=['POST'])
 @login_required
 @admin_or_staff_required
 def clear_security_logs():
+    if (current_user.role or '').strip() != 'Administrator':
+        abort(403)
+
+    reason = (
+        request.form.get('reason')
+        or request.form.get('archive_reason')
+        or ''
+    ).strip()
+    if not reason:
+        flash("A written reason is required before archiving the audit logs.", "danger")
+        return redirect(url_for('admin.security_dashboard'))
+
     try:
-        SecurityLog.query.delete()
+        active_query = SecurityLog.query.filter_by(is_archived=False)
+        count = active_query.count()
+        if count == 0:
+            flash("There are no active security logs to archive.", "info")
+            return redirect(url_for('admin.security_dashboard'))
+
+        active_query.update(
+            {
+                'is_archived': True,
+                'archived_at': datetime.utcnow(),
+                'archived_by': current_user.email,
+                'archive_reason': reason[:255],
+            },
+            synchronize_session=False,
+        )
+        db.session.add(SecurityLog(
+            event_type="Audit Logs Archived",
+            description=(
+                f"{count} security log(s) archived by Administrator. "
+                f"Reason: {reason[:255]}"
+            ),
+            user_id=current_user.id,
+            user_email=current_user.email,
+            severity="High",
+        ))
         db.session.commit()
-        flash("All security logs have been cleared.", "success")
+        flash(
+            f"{count} security log(s) archived. The records remain permanently "
+            "in the database.",
+            "success",
+        )
     except Exception as e:
         db.session.rollback()
-        flash(f"Error clearing logs: {str(e)}", "error")
+        flash(f"Error archiving logs: {str(e)}", "error")
     return redirect(url_for('admin.security_dashboard'))
 
 # ── Backup Management ──────────────────────────
@@ -5684,12 +5880,25 @@ def settings():
                 raise ValueError("Damage percentages must be between 0 and 100.")
             if minor_pct > major_pct:
                 raise ValueError("Minor damage percentage cannot exceed major damage percentage.")
+
+            deposit_tiers = parse_deposit_tiers(
+                request.form.get('deposit_distance_tiers', '')
+            )
+            if not deposit_tiers:
+                raise ValueError(
+                    "Add at least one distance tier (for example 3:500, 6:1000, *:1500)."
+                )
         except (ValueError, InvalidOperation, TypeError) as exc:
             flash(f"Please check the values: {exc}", "danger")
             return redirect(url_for('admin.settings'))
 
         SystemSetting.set_value(
             'deposit_flat_amount', f"{deposit_flat:.2f}", current_user.id
+        )
+        SystemSetting.set_value(
+            'deposit_distance_tiers',
+            format_deposit_tiers(deposit_tiers),
+            current_user.id,
         )
         SystemSetting.set_value(
             'late_fee_per_day', f"{late_fee:.2f}", current_user.id

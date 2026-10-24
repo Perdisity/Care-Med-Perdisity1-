@@ -24,15 +24,19 @@
         <div style="border:1px solid #e2e8f0; border-radius:12px; padding:20px; margin-bottom:18px; background:#f8fafc;">
             <h3 style="margin:0 0 4px 0; font-size:0.95rem; color:#0f172a;">Rental Deposit (FR02 / RULE-03)</h3>
             <p style="margin:0 0 16px 0; color:#64748b; font-size:0.78rem;">
-                Applied automatically to Delivery rentals. Walk-in rentals default to zero and may be
-                adjusted by staff. Distance is still recorded on every delivery transaction.
+                Delivery deposits are computed from the distance tiers below and applied automatically.
+                Walk-in rentals default to zero and may be adjusted by staff. Every delivery still records
+                its distance and the matched deposit rule.
             </p>
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
                 <div>
-                    <label class="clinical-label" for="deposit_flat_amount">Flat Delivery Deposit (₱)</label>
+                    <label class="clinical-label" for="deposit_flat_amount">Fallback Delivery Deposit (₱)</label>
                     <input class="clinical-input" type="number" id="deposit_flat_amount" name="deposit_flat_amount"
                         min="0" step="0.01" required
                         value="{{ '%.2f'|format(settings['deposit_flat_amount'].as_python()) }}">
+                    <small style="color:#94a3b8; font-size:0.7rem;">
+                        Used only when no distance tier matches (for example, if tiers have no * fallback).
+                    </small>
                 </div>
                 <div>
                     <label class="clinical-label">Reconciliation Cutoffs</label>
@@ -40,6 +44,18 @@
                         value="{{ settings['cutoff_days'].value }} of each month">
                     <small style="color:#94a3b8; font-size:0.7rem;">Prime Gas supplier reconciliation dates (fixed by the study).</small>
                 </div>
+            </div>
+            <div style="margin-top:16px;">
+                <label class="clinical-label" for="deposit_distance_tiers">Distance-Based Deposit Tiers</label>
+                <textarea class="clinical-input" id="deposit_distance_tiers" name="deposit_distance_tiers"
+                    rows="4" required style="font-family:ui-monospace, SFMono-Regular, Consolas, monospace; resize:vertical;"
+                    placeholder="3:500, 6:1000, *:1500">{{ settings['deposit_distance_tiers'].value }}</textarea>
+                <small style="color:#64748b; font-size:0.72rem; display:block; margin-top:5px; line-height:1.5;">
+                    One tier per line or comma-separated, in the format <strong>max_km:amount</strong>.
+                    A delivery up to the tier distance uses that amount. Use <strong>*</strong> for the
+                    fallback above the last distance. Example: <code>3:500, 6:1000, *:1500</code>
+                    means ₱500 up to 3 km, ₱1,000 up to 6 km, and ₱1,500 beyond 6 km.
+                </small>
             </div>
         </div>
 

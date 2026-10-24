@@ -100,6 +100,11 @@ class SecurityLog(db.Model):
     user_agent = db.Column(db.String(255), nullable=True)
     severity = db.Column(db.String(20), default='Low')  # Low / Medium / High / Critical
     is_suspicious = db.Column(db.Boolean, default=False)
+    # Permanent audit trail: rows are archived, never hard-deleted.
+    is_archived = db.Column(db.Boolean, default=False, nullable=False, index=True)
+    archived_at = db.Column(db.DateTime, nullable=True)
+    archived_by = db.Column(db.String(120), nullable=True)
+    archive_reason = db.Column(db.String(255), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     user = db.relationship("User", backref=db.backref("security_logs", lazy="dynamic"))

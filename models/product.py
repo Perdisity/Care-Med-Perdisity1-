@@ -468,6 +468,10 @@ class Rental(db.Model):
     # RULE-10: condition recorded at return and the fee assessed against the deposit.
     return_condition = db.Column(db.String(30), nullable=True)
     damage_fee = db.Column(db.Numeric(10, 2), default=0.00)
+    # RULE-10 / TC-11: mandatory reason code and Administrator approval snapshot.
+    damage_reason = db.Column(db.String(60), nullable=True)
+    damage_approved_by_id = db.Column(db.Integer, nullable=True)
+    damage_approved_at = db.Column(db.DateTime, nullable=True)
     
     is_deposit_refunded = db.Column(db.Boolean, default=False)
     delivery_fee = db.Column(db.Numeric(10, 2), default=0.00)

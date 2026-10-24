@@ -198,8 +198,11 @@
                         <label>Customer Deposit (₱)</label>
                         <input type="number" id="rent-customer-deposit" name="customer_deposit" class="clinical-input" step="0.01" value="0.00" placeholder="Refundable deposit"
                             data-flat-deposit="{{ biz.deposit_flat_amount }}"
-                            title="Delivery rentals use the flat deposit set by the administrator.">
-                        <small style="color:#64748b; font-size:0.7rem;">Delivery: ₱{{ '%.2f'|format(biz.deposit_flat_amount) }} flat deposit auto-applied</small>
+                            data-deposit-tiers='{{ deposit_tiers_json|tojson }}'
+                            title="Delivery deposits are computed from the owner-configured distance tiers.">
+                        <small id="rent-deposit-hint" style="color:#64748b; font-size:0.7rem;">
+                            Delivery deposit is computed from distance.
+                        </small>
                     </div>
                 </div>
 

@@ -198,10 +198,22 @@
                 Security Event Log
             </h3>
             <div style="display:flex; gap:8px; align-items:center;">
-                <form id="clearLogsForm" method="POST" action="{{ url_for('admin.clear_security_logs') }}">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    <button type="submit" class="clear-btn">Clear All</button>
-                </form>
+                {% if show_archived %}
+                    <a href="{{ url_for('admin.security_dashboard') }}" class="clear-btn"
+                       style="text-decoration:none; display:inline-flex; align-items:center;">
+                        View Active Logs
+                    </a>
+                {% else %}
+                    <a href="{{ url_for('admin.security_dashboard', archived=1) }}" class="clear-btn"
+                       style="text-decoration:none; display:inline-flex; align-items:center;">
+                        Archived ({{ archived_count }})
+                    </a>
+                    <form id="clearLogsForm" method="POST" action="{{ url_for('admin.clear_security_logs') }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="reason" id="clearLogsReason">
+                        <button type="submit" class="clear-btn">Archive All</button>
+                    </form>
+                {% endif %}
             </div>
         </div>
  
@@ -237,6 +249,12 @@
                         data-useragent="{{ log.user_agent | lower if log.user_agent else '' }}">
                         <td style="white-space:nowrap; color:#94a3b8; font-size:0.72rem;">
                             {{ log.created_at|pst('%m/%d %I:%M:%S %p') }}
+                            {% if show_archived and log.archived_at %}
+                                <small style="display:block; color:#94a3b8; font-size:0.65rem; white-space:normal;">
+                                    Archived {{ log.archived_at|pst('%m/%d %I:%M %p') }}
+                                    {% if log.archive_reason %}— {{ log.archive_reason }}{% endif %}
+                                </small>
+                            {% endif %}
                         </td>
                         <td>
                             {% set et = log.event_type | lower %}
@@ -287,7 +305,12 @@
                             {% endif %}
                         </td>
                         <td>
-                            <button class="log-delete-btn" data-log-id="{{ log.id }}">✕</button>
+                            {% if show_archived %}
+                                <span class="pill pill-gray">Archived</span>
+                            {% else %}
+                                <button class="log-delete-btn" data-log-id="{{ log.id }}"
+                                        title="Archive this log entry (retained in the database)">Archive</button>
+                            {% endif %}
                         </td>
                     </tr>
                     {% endfor %}
@@ -719,38 +742,58 @@
         });
     });
  
-    // Delete individual log
+    // Archive an individual log. Records are retained in the database.
     const logBody = document.getElementById('logBody');
     if (logBody) {
         logBody.addEventListener('click', async function (e) {
             const btn = e.target.closest('.log-delete-btn');
             if (!btn) return;
-            if (!confirm('Delete this log entry?')) return;
+            const reason = prompt(
+                'Reason for archiving this audit log entry:\n' +
+                '(The record is retained in the database.)'
+            );
+            if (reason === null) return;
+            if (!reason.trim()) {
+                alert('A written reason is required.');
+                return;
+            }
             const logId = btn.dataset.logId;
             try {
                 const res  = await fetch('/admin/security/delete-log/' + logId, {
                     method: 'POST',
-                    headers: { 'X-CSRFToken': csrfToken }
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': csrfToken
+                    },
+                    body: JSON.stringify({ reason: reason.trim() })
                 });
                 const data = await res.json();
                 if (data.success) {
                     btn.closest('tr').remove();
                 } else {
-                    alert('Failed to delete log: ' + (data.message || 'Unknown error'));
+                    alert('Failed to archive log: ' + (data.message || 'Unknown error'));
                 }
             } catch (err) {
-                alert('Network error while deleting log.');
+                alert('Network error while archiving log.');
             }
         });
     }
  
-    // Clear all logs
+    // Archive all active logs. Records are retained in the database.
     const clearForm = document.getElementById('clearLogsForm');
     if (clearForm) {
         clearForm.addEventListener('submit', function (e) {
-            if (!confirm('Clear ALL logs? This cannot be undone.')) {
+            const reason = prompt(
+                'Reason for archiving ALL active audit logs:\n' +
+                '(The records are retained in the database.)'
+            );
+            if (reason === null || !reason.trim()) {
                 e.preventDefault();
+                if (reason !== null) alert('A written reason is required.');
+                return;
             }
+            const reasonInput = document.getElementById('clearLogsReason');
+            if (reasonInput) reasonInput.value = reason.trim();
         });
     }
  
