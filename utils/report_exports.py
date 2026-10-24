@@ -368,7 +368,11 @@ def build_movements_export(start_dt=None, end_dt=None):
 
 # ── Supplier reconciliation (Prime Gas) ─────────────────────────────────────
 def build_supplier_export(start_dt=None, end_dt=None):
-    headers = ["Date", "Prime Gas Batch", "Units Refilled", "Amount Paid", "Recorded By", "Notes"]
+    headers = [
+        "Date", "Prime Gas Batch", "Product", "Units Refilled",
+        "Current Empty Awaiting Refill", "Current Full in Stock",
+        "Amount Paid", "Recorded By", "Notes",
+    ]
     query = Expense.query.filter(Expense.category == "Primegas Refill")
     if start_dt:
         query = query.filter(Expense.date_incurred >= start_dt.date())
@@ -377,10 +381,15 @@ def build_supplier_export(start_dt=None, end_dt=None):
 
     rows = []
     for expense in query.order_by(Expense.date_incurred.asc()).all():
+        product = expense.product
+        tank = product.tank_status if product else None
         rows.append([
             expense.date_incurred,
             expense.expense_title or "—",
+            product.name if product else "—",
             expense.refill_quantity if expense.refill_quantity is not None else "—",
+            (tank.empty_in_stock or 0) if tank else "—",
+            (tank.full_in_stock or 0) if tank else "—",
             float(expense.amount or 0),
             expense.recorded_by.full_name if expense.recorded_by else "—",
             (expense.description or "")[:200],
@@ -389,12 +398,13 @@ def build_supplier_export(start_dt=None, end_dt=None):
     wb, ws, header_row, *_ = _new_sheet(
         "Prime Gas Reconciliation",
         headers,
-        f"Prime Gas Supplier Reconciliation · {range_label(start_dt, end_dt)} · cutoffs on the 5th and 20th",
+        f"Prime Gas Supplier Reconciliation · {range_label(start_dt, end_dt)} · "
+        "cutoffs on the 5th and 20th · Refill Needed = current empty tanks awaiting refill",
     )
     _finish_sheet(
         ws, header_row, headers, rows,
-        money_cols=(4,),
+        money_cols=(7,),
         date_cols=(1,),
-        center_cols=(3,),
+        center_cols=(4, 5, 6),
     )
     return wb

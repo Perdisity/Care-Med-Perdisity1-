@@ -741,8 +741,12 @@ def process_refill_transaction():
 
         log = InventoryLog(
             product_id=product.id if product else None,
+            transaction_id=new_transaction.id,
+            reference_no=new_transaction.reference_no,
+            reason_code="REFILL_SERVICE",
             action="Refill Service Completed & Swapped" if buyer_type == 'registered' else "Walk-in Refill Service Completed",
             quantity=quantity,
+            balance_after=product.stock if product else None,
             note=f"Processed refill for {display_name}. Subtotal: {form_amount} PHP, Net Total: {net_total} PHP.",
             user_id=current_user.id,
             user_name=getattr(current_user, 'full_name', 'System Administrator')
@@ -1495,8 +1499,11 @@ def edit_product(product_id):
         if changes:
             inventory_log = InventoryLog(
                 product_id=product.id,
+                reference_no=f"PRD-{product.id:05d}",
+                reason_code="PRODUCT_EDIT",
                 action="Product Edited",
-                quantity=product.stock,
+                quantity=0,
+                balance_after=product.stock,
                 note=f"{'; '.join(changes)}",
                 user_id=current_user.id,
                 user_name=current_user.full_name
@@ -1565,6 +1572,9 @@ def update_stock(product_id):
             )
             product.cost_price = new_unit_cost
 
+        restock_ref = (
+            f"RST-{product.id:05d}-{datetime.utcnow():%Y%m%d%H%M%S}"
+        )
         log_note = (
             f"Restocked: {old_stock} → {product.stock}. "
             f"Reason: {reason}"
@@ -1574,6 +1584,7 @@ def update_stock(product_id):
 
         db.session.add(InventoryLog(
             product_id=product.id,
+            reference_no=restock_ref,
             reason_code="RESTOCK",
             action="Restock",
             quantity=increment,
@@ -1605,7 +1616,10 @@ def update_stock(product_id):
         else:
             db.session.add(InventoryLog(
                 product_id=product.id,
+                reference_no=restock_ref,
+                reason_code="ACQUISITION_WARNING",
                 action="Acquisition Warning",
+                balance_after=product.stock,
                 note=f"No cost provided for restock of '{product.name}' — no expense recorded.",
                 user_id=current_user.id,
                 user_name=current_user.full_name
@@ -1644,13 +1658,14 @@ def delete_product(product_id):
     try:
         has_active_rentals = Rental.query.filter(
             Rental.product_id == product.id,
-            Rental.status.in_(["Active", "Overdue"])
+            Rental.status.in_(["Active", "Overdue", "Partially Returned", "Awaiting Return"])
         ).first()
 
         if has_active_rentals:
             flash(f"Cannot archive '{product.name}' due to active rentals.", "warning")
             return redirect(url_for('admin.products'))
 
+        old_stock = product.stock or 0
         product.status = "Archived"
         product.stock = 0
 
@@ -1662,8 +1677,11 @@ def delete_product(product_id):
 
         db.session.add(InventoryLog(
             product_id=product.id,
+            reference_no=f"ARC-{product.id:05d}",
+            reason_code="ARCHIVE",
             action="ARCHIVE",
-            quantity=0,
+            quantity=-old_stock,
+            balance_after=0,
             note=f"Archived by {current_user.full_name}",
             user_id=current_user.id,
             user_name=current_user.full_name
@@ -2198,28 +2216,53 @@ def process_rental():
                         serials.append(serial_val.strip())
 
             if product.is_refillable:
-                if not product.tank_status:
+                tank_status = product.tank_status
+                if not tank_status:
                     db.session.rollback()
                     flash(f"Tank status not configured for {product.name}", "danger")
                     return redirect(request.referrer or url_for('admin.transactions'))
 
-                available = product.tank_status.full_in_stock or 0
-                if available < qty:
+                # TC-04: a conditional UPDATE is atomic on SQLite and MySQL.
+                # Two concurrent rentals cannot both pass the availability check.
+                updated_rows = (
+                    db.session.query(TankStatus)
+                    .filter(
+                        TankStatus.id == tank_status.id,
+                        TankStatus.full_in_stock >= qty,
+                    )
+                    .update(
+                        {
+                            TankStatus.full_in_stock: TankStatus.full_in_stock - qty,
+                            TankStatus.rented_out: func.coalesce(
+                                TankStatus.rented_out, 0
+                            ) + qty,
+                        },
+                        synchronize_session=False,
+                    )
+                )
+                if not updated_rows:
                     db.session.rollback()
-                    flash(f"Not enough available tanks for {product.name}. Available: {available}", "danger")
+                    flash(f"Not enough available tanks for {product.name}.", "danger")
                     return redirect(request.referrer or url_for('admin.transactions'))
-
-                product.tank_status.rented_out = (product.tank_status.rented_out or 0) + qty
-                product.tank_status.full_in_stock = max((product.tank_status.full_in_stock or 0) - qty, 0)
+                db.session.refresh(tank_status)
                 log_note = f"Rental created (Tank metrics updated) {ref_no}"
             else:
                 if hasattr(product, 'stock') and product.stock is not None:
-                    if product.stock < qty:
+                    # TC-04: conditional decrement prevents overselling under
+                    # concurrent requests, even when row locks are unavailable.
+                    updated_rows = (
+                        db.session.query(Product)
+                        .filter(Product.id == product.id, Product.stock >= qty)
+                        .update(
+                            {Product.stock: Product.stock - qty},
+                            synchronize_session=False,
+                        )
+                    )
+                    if not updated_rows:
                         db.session.rollback()
-                        flash(f"Not enough stock available for {product.name}. Available: {product.stock}", "danger")
+                        flash(f"Not enough stock available for {product.name}.", "danger")
                         return redirect(request.referrer or url_for('admin.transactions'))
-                    
-                    product.stock -= qty
+                    db.session.refresh(product)
                     if product.stock <= 0:
                         product.stock = 0
                         product.status = "Out of Stock"
@@ -2536,7 +2579,7 @@ def transactions():
             Transaction.transaction_type == 'Rental',
             Transaction.rentals.any(
                 and_(
-                    Rental.status.in_(['Active', 'Partially Returned']),
+                    Rental.status.in_(['Active', 'Partially Returned', 'Awaiting Return']),
                     Rental.expected_return_date >= current_date,
                     Rental.expected_return_date <= soon
                 )
@@ -2548,7 +2591,7 @@ def transactions():
             Transaction.transaction_type == 'Rental',
             Transaction.rentals.any(
                 and_(
-                    Rental.status.in_(['Active', 'Partially Returned']),
+                    Rental.status.in_(['Active', 'Partially Returned', 'Awaiting Return']),
                     Rental.expected_return_date < current_date
                 )
             )
@@ -3828,20 +3871,6 @@ def process_primegas():
     tank_status.empty_in_stock -= quantity
     tank_status.full_in_stock += quantity
 
-    db.session.add(InventoryLog(
-        product_id=tank_status.product_id,
-        reason_code="REFILL",
-        action="Primegas Tank Refill",
-        quantity=0,
-        balance_after=tank_status.product.stock if tank_status.product else None,
-        note=(
-            f"Primegas refill: {quantity} empty tank(s) converted to full. "
-            f"Empty: {tank_status.empty_in_stock}, Full: {tank_status.full_in_stock}."
-        ),
-        user_id=current_user.id,
-        user_name=getattr(current_user, 'full_name', 'System Administrator')
-    ))
-
     new_expense = Expense(
         category="Primegas Refill",
         expense_title=f"Refilled {quantity} units",
@@ -3852,7 +3881,23 @@ def process_primegas():
         recorded_by_id=current_user.id
     )
     db.session.add(new_expense)
-    
+    db.session.flush()
+
+    db.session.add(InventoryLog(
+        product_id=tank_status.product_id,
+        reference_no=f"EXP-{new_expense.id:05d}",
+        reason_code="REFILL",
+        action="Primegas Tank Refill",
+        quantity=quantity,
+        balance_after=tank_status.full_in_stock,
+        note=(
+            f"Primegas refill: {quantity} empty tank(s) converted to full. "
+            f"Empty: {tank_status.empty_in_stock}, Full: {tank_status.full_in_stock}."
+        ),
+        user_id=current_user.id,
+        user_name=getattr(current_user, 'full_name', 'System Administrator')
+    ))
+
     db.session.commit()
     
     flash(f'Successfully refilled {quantity} tank(s) and recorded expense!', 'success')
@@ -5665,7 +5710,7 @@ def _build_notifications():
 
     # ── 2. RENTALS EXPIRING WITHIN 3 DAYS ─────────────────────────────────
     expiring_soon = Rental.query.filter(
-        Rental.status.in_(['Active', 'Partially Returned']),
+        Rental.status.in_(['Active', 'Partially Returned', 'Awaiting Return']),
         Rental.expected_return_date >= today,
         Rental.expected_return_date <= soon
     ).all()
@@ -5683,7 +5728,7 @@ def _build_notifications():
 
     # ── 3. OVERDUE RETURNS (items not returned past due date) ──────────────────
     overdue_returns = Rental.query.filter(
-        Rental.status.in_(['Active', 'Partially Returned']),
+        Rental.status.in_(['Active', 'Partially Returned', 'Awaiting Return']),
         Rental.expected_return_date < today
     ).all()
 

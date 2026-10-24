@@ -771,12 +771,32 @@ def place_order():
                 db.session.flush()
                 rental.generate_monthly_invoices()
 
-            product.stock -= item.quantity
+            # TC-04: conditional decrement keeps the online checkout safe when
+            # two customers order the last unit at the same time.
+            updated_rows = Product.query.filter(
+                Product.id == product.id,
+                Product.stock >= item.quantity,
+            ).update(
+                {Product.stock: Product.stock - item.quantity},
+                synchronize_session=False,
+            )
+            if not updated_rows:
+                raise ValueError(f"Only {product.stock} units of {product.name} are left.")
+            db.session.refresh(product)
             if product.stock <= 0: product.status = "Out of Stock"
 
-            db.session.add(InventoryLog(product_id=product.id, action="Online Order", 
-                                        quantity=-item.quantity, note=f"Ref: {ref_no}", 
-                                        user_id=current_user.id, user_name=new_transaction.customer_name))
+            db.session.add(InventoryLog(
+                product_id=product.id,
+                transaction_id=new_transaction.id,
+                reference_no=ref_no,
+                reason_code="ONLINE_ORDER",
+                action="Online Order",
+                quantity=-item.quantity,
+                balance_after=product.stock,
+                note=f"Online order {ref_no}",
+                user_id=current_user.id,
+                user_name=new_transaction.customer_name,
+            ))
 
             db.session.delete(item)
 

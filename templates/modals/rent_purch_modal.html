@@ -740,12 +740,15 @@
 
                 <div class="form-field">
                     <label style="font-weight: 700; color: #1e293b; margin-bottom: 6px; display: block; font-size: 0.9rem;">
-                        Quantity (Max: <span id="maxEmptyStock" style="color: #0d9488;">0</span>)
+                        Quantity (Suggested: <span id="maxEmptyStock" style="color: #0d9488;">0</span> empty tank(s))
                     </label>
                     <div style="position: relative;">
                         <input type="number" name="quantity" id="primegasQty" placeholder="Enter quantity" min="1" required style="width: 100%; height: 44px; padding: 0 16px 0 40px; background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; color: #1e293b; font-size: 0.95rem; outline: none; box-sizing: border-box;">
                         <span class="material-symbols-rounded" style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: #64748b; pointer-events: none; font-size: 20px;">pin</span>
                     </div>
+                    <small style="display:block; margin-top:6px; color:#64748b; font-size:0.75rem;">
+                        Suggested from empty tanks awaiting refill. You may adjust for the actual supplier batch.
+                    </small>
                 </div>
 
                 <!-- NEW: Amount Field for Expense Tracking -->

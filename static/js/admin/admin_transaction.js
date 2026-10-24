@@ -2017,10 +2017,9 @@ productSelect.addEventListener('change', function() {
     maxStockSpan.textContent = maxStock;
     qtyInput.max = maxStock;
     
-    // Reset quantity if it exceeds the new maximum
-    if (qtyInput.value && parseInt(qtyInput.value) > maxStock) {
-        qtyInput.value = maxStock;
-    }
+    // Default to the computed refill quantity (all empty tanks). The user can
+    // still adjust it to match the actual supplier batch.
+    qtyInput.value = maxStock > 0 ? maxStock : "";
 });
 
 // 3. Close Modal
