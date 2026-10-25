@@ -293,6 +293,18 @@ if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
     print("[Backup] Scheduler started — auto backup runs every midnight")
 
 
+def load_demo_data():
+    """Create tables and seed presentation data. Safe to re-run."""
+    from seed_users import seed_users
+    from seed_demo import main as seed_demo
+
+    with app.app_context():
+        db.create_all()
+        seed_users()
+        seed_demo()
+
+
 if __name__ == "__main__":
+    load_demo_data()
     debug = os.environ.get("DEBUG", "False") == "True"
     app.run(debug=debug)

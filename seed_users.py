@@ -8,7 +8,8 @@ users_to_create = [
     {"email": "caremed.custodian@gmail.com", "password": "Custodian@12345", "role": "Custodian",     "first_name": "Custodian", "last_name": "CareMed"},
 ]
 
-with app.app_context():
+
+def seed_users():
     for u in users_to_create:
         existing = User.query.filter_by(email=u["email"]).first()
         if existing:
@@ -27,3 +28,8 @@ with app.app_context():
         print("Created:", u["email"], "-", u["role"])
     db.session.commit()
     print("Done.")
+
+
+if __name__ == "__main__":
+    with app.app_context():
+        seed_users()

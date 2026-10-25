@@ -28,9 +28,14 @@ def rate_limit_key():
         return f"user:{current_user.id}"
     return get_remote_address()
 
+_default_limiter = (
+    "memory://"
+    if os.environ.get("FLASK_ENV") == "development"
+    else "redis://redis:6379/0"
+)
 limiter = Limiter(
     key_func=rate_limit_key,
-    storage_uri=os.environ.get("RATELIMIT_STORAGE_URI", "redis://redis:6379/0"),
+    storage_uri=os.environ.get("RATELIMIT_STORAGE_URI", _default_limiter),
     default_limits=["200 per day", "50 per hour"]
 )
 login_manager.login_view = "auth.login"
