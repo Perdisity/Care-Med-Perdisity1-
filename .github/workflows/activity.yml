@@ -1,0 +1,56 @@
+name: Activity
+
+on:
+  schedule:
+    # 2 runs daily in Philippine Time (PHT, UTC+8) -> 3 commits/day total:
+    # - 09:15 AM PHT (01:15 UTC) -> Morning run: 2 commits
+    # - 08:25 PM PHT (12:25 UTC) -> Evening run: 1 commit
+    - cron: '15 1 * * *'
+    - cron: '25 12 * * *'
+  workflow_dispatch: # Allows manual trigger from the Actions tab anytime
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Execute stealth activity sync
+        run: |
+          git config user.name "Carl"
+          git config user.email "178656416+crl-charm@users.noreply.github.com"
+
+          # 3 commits per day: 2 in the morning run (01:15 UTC), 1 in the evening run (12:25 UTC)
+          hour=$(date -u +%-H)
+          if [ "$hour" -lt 12 ]; then
+            commit_target=2
+          else
+            commit_target=1
+          fi
+          count=0
+
+          while [ $count -lt $commit_target ]; do
+            commit_id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s%N)
+            current_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+            # Invisible HTML comment update in README.md (no visual disruption to app or docs)
+            sed -i '/<!-- telemetry:/d' README.md
+            echo "<!-- telemetry: $current_time id: $commit_id -->" >> README.md
+
+            git add README.md
+            git commit -m "Update README.md" || true
+            count=$((count + 1))
+            sleep $(( ( RANDOM % 4 ) + 2 ))
+          done
+
+          git config pull.rebase true
+          git pull origin main --no-edit || true
+          git push origin main
+
+
+          

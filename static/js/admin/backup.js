@@ -40,6 +40,7 @@ document.addEventListener("DOMContentLoaded", function() {
                                 <a href="/admin/backup/download/${backup.filename}" class="btn-dl">
                                     <span class="material-symbols-rounded" style="font-size:14px;">download</span>Download
                                 </a>
+                                <button type="button" class="btn-restore restore-backup-btn" data-filename="${backup.filename}" style="background:#f0fdf4; border:1px solid #86efac; color:#16a34a; padding:5px 10px; border-radius:6px; font-size:0.75rem; font-weight:600; cursor:pointer;">Restore</button>
                                 <button type="button" class="btn-del delete-backup-btn" data-filename="${backup.filename}">Delete</button>
                             </div>
                         </td>
@@ -54,6 +55,37 @@ document.addEventListener("DOMContentLoaded", function() {
         });
 
     document.addEventListener('click', function(event) {
+        const restoreBtn = event.target.closest('.restore-backup-btn');
+        if (restoreBtn) {
+            const filename = restoreBtn.getAttribute('data-filename');
+            const confirmed = confirm(
+                `WARNING: Restoring will overwrite current database records with the contents of "${filename}".\n\n` +
+                `An automatic pre-restore safety backup will be created first so no data is permanently lost.\n\n` +
+                `Do you want to proceed with this database restore?`
+            );
+            if (!confirmed) return;
+
+            restoreBtn.disabled = true;
+            restoreBtn.innerText = 'Restoring...';
+
+            fetch(`/admin/backup/restore/${filename}`, {
+                method: 'POST',
+                headers: {
+                    'X-CSRFToken': csrfToken
+                }
+            })
+            .then(response => {
+                window.location.reload();
+            })
+            .catch(err => {
+                console.error('Error restoring backup:', err);
+                alert('An error occurred during restore.');
+                restoreBtn.disabled = false;
+                restoreBtn.innerText = 'Restore';
+            });
+            return;
+        }
+
         const btn = event.target.closest('.delete-backup-btn');
         if (!btn) return;
 

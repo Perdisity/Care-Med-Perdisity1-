@@ -25,7 +25,7 @@ from sqlalchemy.orm import joinedload, selectinload
 import os   
 import uuid
 import random, string
-from utils.backup import create_backup, get_all_backups
+from utils.backup import create_backup, get_all_backups, restore_backup
 from utils.report_exports import (
     build_inventory_export,
     build_movements_export,
@@ -2133,6 +2133,13 @@ def process_rental():
         now = datetime.now()
         ref_no = f"RNT-{now:%m%d%Y-%H%M%S}-{''.join(random.choices(string.ascii_uppercase + string.digits, k=4))}"
 
+        delivery_address_val = request.form.get('delivery_address', '')
+        if isinstance(delivery_address_val, list):
+            delivery_address_val = delivery_address_val[0]
+        landmark_val = request.form.get('landmark', '')
+        if isinstance(landmark_val, list):
+            landmark_val = landmark_val[0]
+
         new_txn = Transaction(
             reference_no=ref_no,
             customer_id=int(customer_id) if customer_id else None,
@@ -2143,6 +2150,10 @@ def process_rental():
             voucher_amount=voucher_amount,
             delivery_fee=delivery_fee,
             fulfillment_type=fulfillment_type,
+            delivery_address=delivery_address_val if fulfillment_type == 'Delivery' else None,
+            landmark=landmark_val if fulfillment_type == 'Delivery' else None,
+            delivery_status="Pending" if fulfillment_type == "Delivery" else "N/A",
+            tracking_status="SUBMITTED" if fulfillment_type == "Delivery" else "DELIVERED",
             has_initial_fill=has_initial_fill,
             initial_fill_cost=initial_fill_cost,
             deposit_amount=customer_deposit,
@@ -2897,7 +2908,114 @@ def active_rentals():
         datetime_now_date=date.today(),
         current_filter=filter_type 
     )
-    
+
+@admin_bp.route('/delivery-dispatch')
+@login_required
+@admin_or_staff_required
+@permission_required('can_view_active_rentals')
+def delivery_dispatch():
+    status_filter = request.args.get('status', '').strip()
+    search_query = request.args.get('q', '').strip()
+    page = request.args.get('page', 1, type=int)
+    limit = request.args.get('limit', 15, type=int)
+
+    base_query = Transaction.query.filter(
+        or_(
+            Transaction.fulfillment_type == 'Delivery',
+            Transaction.delivery_status.in_(['Pending', 'Out for Delivery', 'Delivered'])
+        )
+    ).options(
+        joinedload(Transaction.customer),
+        selectinload(Transaction.rentals).options(joinedload(Rental.product)),
+        selectinload(Transaction.purchases).options(joinedload(Purchase.product))
+    )
+
+    if search_query:
+        like = f"%{search_query}%"
+        base_query = base_query.filter(or_(
+            Transaction.reference_no.ilike(like),
+            Transaction.customer_name.ilike(like),
+            Transaction.delivery_address.ilike(like),
+            Transaction.landmark.ilike(like)
+        ))
+
+    if status_filter in ['Pending', 'Out for Delivery', 'Delivered']:
+        base_query = base_query.filter(Transaction.delivery_status == status_filter)
+
+    pending_count = Transaction.query.filter(
+        or_(Transaction.fulfillment_type == 'Delivery', Transaction.delivery_status != 'N/A'),
+        Transaction.delivery_status == 'Pending'
+    ).count()
+
+    out_for_delivery_count = Transaction.query.filter(
+        or_(Transaction.fulfillment_type == 'Delivery', Transaction.delivery_status != 'N/A'),
+        Transaction.delivery_status == 'Out for Delivery'
+    ).count()
+
+    delivered_count = Transaction.query.filter(
+        or_(Transaction.fulfillment_type == 'Delivery', Transaction.delivery_status != 'N/A'),
+        Transaction.delivery_status == 'Delivered'
+    ).count()
+
+    total_deliveries = pending_count + out_for_delivery_count + delivered_count
+
+    pagination = base_query.order_by(
+        case(
+            (Transaction.delivery_status == 'Pending', 1),
+            (Transaction.delivery_status == 'Out for Delivery', 2),
+            else_=3
+        ),
+        Transaction.created_at.desc()
+    ).paginate(page=page, per_page=limit, error_out=False)
+
+    return render_template(
+        'admin/delivery_dispatch.html',
+        deliveries=pagination.items,
+        pagination=pagination,
+        current_status=status_filter,
+        search_query=search_query,
+        pending_count=pending_count,
+        out_for_delivery_count=out_for_delivery_count,
+        delivered_count=delivered_count,
+        total_deliveries=total_deliveries
+    )
+
+
+@admin_bp.route('/delivery-dispatch/<int:txn_id>/status', methods=['POST'])
+@login_required
+@admin_or_staff_required
+@permission_required('can_view_active_rentals')
+def update_delivery_status(txn_id):
+    txn = Transaction.query.get_or_404(txn_id)
+    new_status = request.form.get('delivery_status', '').strip()
+    valid_statuses = ['Pending', 'Out for Delivery', 'Delivered']
+
+    if new_status in valid_statuses:
+        old_status = txn.delivery_status
+        txn.delivery_status = new_status
+        if new_status == 'Out for Delivery':
+            txn.tracking_status = 'SHIPPED'
+        elif new_status == 'Delivered':
+            txn.tracking_status = 'DELIVERED'
+            if txn.transaction_type != 'Rental':
+                txn.status = 'Closed'
+
+        try:
+            db.session.add(SecurityLog(
+                user_id=current_user.id,
+                event_type="Delivery Status Updated",
+                description=f"Transaction {txn.reference_no} delivery status changed from '{old_status}' to '{new_status}' by {current_user.full_name or current_user.email}."
+            ))
+            db.session.commit()
+            flash(f"Delivery status for {txn.reference_no} updated to '{new_status}'.", "success")
+        except Exception as e:
+            db.session.rollback()
+            flash(f"Failed to update delivery status: {str(e)}", "danger")
+    else:
+        flash("Invalid delivery status provided.", "danger")
+
+    return redirect(request.referrer or url_for('admin.delivery_dispatch'))
+
 @admin_bp.route('/collection-monitoring')
 @login_required
 def collection_monitoring():
@@ -5674,6 +5792,44 @@ def delete_backup(filename):
         flash("Backup file not found.", "error")
 
     return redirect(url_for('admin.backup_page'))
+
+@admin_bp.route('/backup/restore/<filename>', methods=['POST'])
+@login_required
+def restore_database_backup(filename):
+    if current_user.role.strip() != 'Administrator':
+        flash("Access restricted to Administrators only.", "danger")
+        return redirect(url_for('admin.dashboard'))
+
+    token = request.headers.get('X-CSRFToken') or request.form.get('csrf_token')
+    try:
+        validate_csrf(token)
+    except ValidationError:
+        flash("CSRF token invalid or missing.", "error")
+        return redirect(url_for('admin.backup_page'))
+
+    if '..' in filename or '/' in filename or '\\' in filename or not filename.endswith('.sql'):
+        flash("Invalid backup file specification.", "error")
+        return redirect(url_for('admin.backup_page'))
+
+    success, message = restore_backup(filename, triggered_by='admin')
+
+    try:
+        db.session.add(SecurityLog(
+            user_id=current_user.id,
+            event_type="Backup Restored" if success else "Backup Restore Failed",
+            description=f"Admin {current_user.email} initiated database restore of {filename}. Result: {message}"
+        ))
+        db.session.commit()
+    except Exception as log_err:
+        current_app.logger.error(f"Audit log error after restore: {log_err}")
+
+    if success:
+        flash(message, "success")
+    else:
+        flash(message, "error")
+
+    return redirect(url_for('admin.backup_page'))
+
 
 
 def _build_notifications():

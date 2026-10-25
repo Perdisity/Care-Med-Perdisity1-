@@ -8,6 +8,17 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'bac
 MAX_BACKUPS = 7
 
 MYSQLDUMP_PATH = os.environ.get("MYSQLDUMP_PATH") or shutil.which("mysqldump") or r"C:\xampp\mysql\bin\mysqldump.exe"
+MYSQL_PATH = os.environ.get("MYSQL_PATH") or shutil.which("mysql") or r"C:\xampp\mysql\bin\mysql.exe"
+
+
+def is_sqlite_database():
+    try:
+        from extensions import db
+        return db.engine.url.drivername.startswith("sqlite")
+    except Exception:
+        db_url = os.environ.get('DATABASE_URL', '')
+        return db_url.startswith("sqlite") or not db_url
+
 
 def get_db_credentials():
     db_url = os.environ.get('DATABASE_URL', '').strip()
@@ -36,6 +47,24 @@ def get_db_credentials():
         print(f"[Backup] DB Parse Error: {e}")
         return None
 
+
+def with_app_context_if_needed(fn):
+    from functools import wraps
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            from flask import has_app_context
+            if not has_app_context():
+                from app import app
+                with app.app_context():
+                    return fn(*args, **kwargs)
+        except Exception:
+            pass
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+@with_app_context_if_needed
 def create_backup(triggered_by='system'):
     try:
         os.makedirs(BACKUP_DIR, exist_ok=True)
@@ -44,8 +73,27 @@ def create_backup(triggered_by='system'):
         filename = f"caremed_backup_{triggered_by}_{timestamp}.sql"
         filepath = os.path.join(BACKUP_DIR, filename)
 
-        creds = get_db_credentials()
+        if is_sqlite_database():
+            from extensions import db
+            conn = db.engine.raw_connection()
+            try:
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    for line in conn.iterdump():
+                        f.write(f"{line}\n")
+            finally:
+                conn.close()
 
+            if os.path.getsize(filepath) == 0:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                return False, "Backup file was empty"
+
+            cleanup_old_backups()
+            size_kb = round(os.path.getsize(filepath) / 1024, 2)
+            print(f"[Backup] SQLite Backup Created: {filename} ({size_kb} KB) by {triggered_by}")
+            return True, filename
+
+        creds = get_db_credentials()
         if not creds:
             return False, "Could not parse database credentials"
 
@@ -89,7 +137,7 @@ def create_backup(triggered_by='system'):
         cleanup_old_backups()
 
         size_kb = round(os.path.getsize(filepath) / 1024, 2)
-        print(f"[Backup] Created: {filename} ({size_kb} KB) by {triggered_by}")
+        print(f"[Backup] MySQL Backup Created: {filename} ({size_kb} KB) by {triggered_by}")
         return True, filename
 
     except subprocess.TimeoutExpired:
@@ -103,6 +151,98 @@ def create_backup(triggered_by='system'):
 
     except Exception as e:
         return False, f"Unexpected backup error: {str(e)}"
+
+
+@with_app_context_if_needed
+def restore_backup(filename, triggered_by='admin'):
+    """
+    Restores the database from a specified backup file.
+    Always creates an automatic pre-restore safety backup first.
+    Returns (success: bool, message: str).
+    """
+    if not filename or not filename.endswith('.sql') or '..' in filename or '/' in filename or '\\' in filename:
+        return False, f"Invalid backup filename: {filename}"
+
+    filepath = os.path.join(BACKUP_DIR, filename)
+    if not os.path.exists(filepath):
+        return False, f"Backup file not found: {filename}"
+
+    # Step 1: Create automatic pre-restore safety backup
+    safety_ok, safety_result = create_backup(triggered_by='pre_restore_safety')
+    if not safety_ok:
+        return False, f"Restore aborted: pre-restore safety backup failed ({safety_result})"
+
+    # Step 2: Perform database restore
+    try:
+        if is_sqlite_database():
+            from extensions import db
+            conn = db.engine.raw_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute("PRAGMA foreign_keys = OFF;")
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
+                tables = [row[0] for row in cursor.fetchall()]
+                for table in tables:
+                    cursor.execute(f'DROP TABLE IF EXISTS "{table}";')
+
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='view';")
+                views = [row[0] for row in cursor.fetchall()]
+                for view in views:
+                    cursor.execute(f'DROP VIEW IF EXISTS "{view}";')
+                conn.commit()
+
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    sql_script = f.read()
+
+                cursor.executescript(sql_script)
+                cursor.execute("PRAGMA foreign_keys = ON;")
+                conn.commit()
+            finally:
+                cursor.close()
+                conn.close()
+
+            print(f"[Backup] Restore completed from {filename} with safety backup {safety_result}")
+            return True, f"Database restored successfully from '{filename}'. Pre-restore safety backup saved as '{safety_result}'."
+
+        # MySQL Restore
+        creds = get_db_credentials()
+        if not creds:
+            return False, "Could not parse database credentials for MySQL restore"
+
+        if not os.path.exists(MYSQL_PATH):
+            return False, f"mysql executable not found at: {MYSQL_PATH}"
+
+        env = os.environ.copy()
+        env['MYSQL_PWD'] = creds['password']
+
+        command = [
+            MYSQL_PATH,
+            f"--user={creds['user']}",
+            f"--host={creds['host']}",
+            f"--port={str(creds['port'])}",
+            '--default-character-set=utf8mb4',
+            creds['dbname']
+        ]
+
+        with open(filepath, 'r', encoding='utf-8') as f:
+            result = subprocess.run(
+                command,
+                stdin=f,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                env=env
+            )
+
+        if result.returncode != 0:
+            error_msg = result.stderr.strip()[:500]
+            return False, f"mysql restore error: {error_msg}"
+
+        print(f"[Backup] MySQL Restore completed from {filename} with safety backup {safety_result}")
+        return True, f"Database restored successfully from '{filename}'. Pre-restore safety backup saved as '{safety_result}'."
+
+    except Exception as e:
+        return False, f"Restore failed with error: {str(e)}"
 
 
 def cleanup_old_backups():
@@ -142,7 +282,12 @@ def get_all_backups():
 
                 size = os.path.getsize(filepath)
                 created = datetime.fromtimestamp(os.path.getctime(filepath))
-                triggered_by = 'admin' if '_admin_' in filename else 'system'
+                if '_pre_restore_safety_' in filename:
+                    triggered_by = 'safety'
+                elif '_admin_' in filename:
+                    triggered_by = 'admin'
+                else:
+                    triggered_by = 'system'
 
                 backups.append({
                     'filename': filename,
@@ -166,7 +311,6 @@ def auto_backup():
         print(f"[Backup] Auto backup successful: {result}")
     else:
         print(f"[Backup] Auto backup FAILED: {result}")
-        # Alert admin by email
         try:
             from flask import current_app
             from extensions import mail

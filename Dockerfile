@@ -13,6 +13,14 @@ RUN apt-get update && apt-get install -y default-mysql-client
 
 COPY . .
 
+# Strip Windows CRLF line endings from the entrypoint and make it executable.
+# dos2unix is the clean way; sed -i 's/\r//' is the fallback.
+RUN apt-get update && apt-get install -y --no-install-recommends dos2unix \
+    && dos2unix entrypoint.sh \
+    && chmod +x entrypoint.sh \
+    && rm -rf /var/lib/apt/lists/*
+
 EXPOSE 5000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "-k", "gevent", "--worker-connections", "1000", "--timeout", "120", "--preload", "--access-logfile", "-", "--error-logfile", "-", "app:app"]
+# entrypoint.sh: waits for MySQL, creates/upgrades schema, then starts gunicorn
+CMD ["sh", "entrypoint.sh"]

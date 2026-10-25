@@ -81,6 +81,11 @@ This means the script will execute automatically every single day at 12:00 AM.
 * Set the trigger to **Daily** running at 12:00 AM.
 * Set the action to **Start a program**, pointing to your virtual environment's `python.exe` with `run_invoice_cron.py` as the argument and your project root folder as the "Start in" path.
 
-```
+---
 
-```
+## Running Automated Tests
+
+To run the automated business-rule and security test suite:
+```bash
+pytest -q
+```

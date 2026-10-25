@@ -117,7 +117,7 @@ class DevConfig:
     MAIL_MAX_EMAILS = 5
     MAIL_TIMEOUT = 10
 
-    MAIL_SUPPRESS_SEND = False
+    MAIL_SUPPRESS_SEND = os.environ.get("MAIL_SUPPRESS_SEND", "True").lower() in ("true", "1", "t")
 
     SECURITY_HEADERS = {
         "X-Content-Type-Options": "nosniff",
