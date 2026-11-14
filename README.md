@@ -88,4 +88,4 @@ This means the script will execute automatically every single day at 12:00 AM.
 To run the automated business-rule and security test suite:
 ```bash
 pytest -q
-<!-- telemetry: 2026-11-13T19:53:12Z id: 7dddacb3-b24e-4705-a587-c6ae9f6f9425 -->
+<!-- telemetry: 2026-11-14T07:34:24Z id: 2ecf2709-be27-453e-986f-9b8d7fd80000 -->
